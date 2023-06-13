@@ -1,0 +1,2268 @@
+---
+title: "XDec_BRCA_deconvolution"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+#Note - loading ggtern will disable features in ggplots 2 - load later
+library(ggalluvial)
+library(gplots)
+library(EDec)
+library(clue)
+library(quadprog)
+library(reshape)
+library(reshape2)
+library(ggfortify)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(VennDiagram)
+library(corrplot)
+library(RColorBrewer)
+library(pvclust)
+library(alluvial)
+library(ggplot2)
+library("recount")
+library(caret)
+library(plotROC)
+library(pROC)
+library(progeny)
+
+
+lmp <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    f <- summary(modelobject)$fstatistic
+    p <- pf(f[1],f[2],f[3],lower.tail=F)
+    attributes(p) <- NULL
+    return(p)
+}
+
+
+
+quantile_normalisation = function(df){
+  df_rank <- apply(df,2,rank,ties.method="min")
+  df_sorted <- data.frame(apply(df, 2, sort))
+  df_mean <- apply(df_sorted, 1, mean)
+  
+  index_to_mean <- function(my_index, my_mean){
+    return(my_mean[my_index])
+  }
+  
+  df_final <- apply(df_rank, 2, index_to_mean, my_mean=df_mean)
+  rownames(df_final) <- rownames(df)
+  return(df_final)
+}
+logistic.a100 = function(x){
+  a = 1/quantile(x, 1.00)
+  1 - exp(1)^(-a*x)
+}
+
+multiplot = function(..., plotlist = NULL, file, cols = 1, layout = NULL) {
+  require(grid)
+  
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  if (is.null(layout)) {
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots == 1) {
+    print(plots[[1]])
+    
+  } else {
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    for (i in 1:numPlots) {
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+removeEMPTYstrings = function(x) {
+  newVectorWOstrings <- x[x != ""]
+  return(newVectorWOstrings)
+}
+
+source("~/Documents/XDec/sources/createSimulatedMixtures.R")
+source("~/Documents/XDec/sources/PAM50ExerciseFunctions.R")
+source("~/Documents/XDec/sources/diffExpEDec.R")
+
+#dir.create("SingleCell/Stage_0", showWarnings = TRUE, recursive = FALSE)
+#dir.create("SingleCell/Stage_1", showWarnings = TRUE, recursive = FALSE)
+#dir.create("SingleCell/Stage_2", showWarnings = TRUE, recursive = FALSE)
+#dir.create("TCGA_BRCA/Stage_0", showWarnings = TRUE, recursive = FALSE)
+#dir.create("TCGA_BRCA/Stage_1", showWarnings = TRUE, recursive = FALSE)
+#dir.create("TCGA_BRCA/Stage_2", showWarnings = TRUE, recursive = FALSE)
+
+my_palette_1 = colorRampPalette(c("white", "lightgreen", "darkgreen"))(n = 59)
+col_breaks_1 = c(seq(0.00, 0.33999, length = 20), # white
+                 seq(0.34, 0.66999, length = 20), # lightgreen
+                 seq(0.67, 1.00000, length = 20)) # darkgreen
+
+my_palette_2 = colorRampPalette(c("white", "lightgreen", "darkgreen"))(n = 59)
+col_breaks_2 = c(seq(0.50, 0.6699, length = 20), # white
+                 seq(0.67, 0.8399, length = 20), # lightgreen
+                 seq(0.84, 1.0000, length = 20)) # darkgreen
+
+my_palette_3 = colorRampPalette(c("yellow","orange","red"))(n = 59)
+col_breaks_3 = c(seq(0.0000,1.9999, length = 20), # for yellow
+                 seq(2.0000,3.9999, length = 20), # for orange
+                 seq(4.0000,6.0000, length = 20)) # for red
+```
+
+```{r GEO cell line refs}
+GEO.Beta = read.table("GEO_Refs_BetaValues.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+GEO.Beta = GEO.Beta[rowSums(GEO.Beta) > 0,]
+GEO.Metadata = read.table("GEO_Refs_Metadata.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+GEO.Variance.Cancer = read.table("GEO_Refs_Variance_Cancer.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+
+CancerEpithelial.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Type == "cancer_epithelial",]$Sample_ID)
+NormalEpithelial.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Type == "normal_epithelial",]$Sample_ID)
+Stromal.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Type == "stromal",]$Sample_ID)
+Immune.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Type == "immune",]$Sample_ID)
+B.Cell.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Subtype == "B_cells",]$Sample_ID)
+DC.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Subtype == "DC",]$Sample_ID)
+Monocytes.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Subtype == "monocytes",]$Sample_ID)
+NK.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Subtype == "CD56+_NK",]$Sample_ID)
+T.Cells.Profiles = as.vector(GEO.Metadata[GEO.Metadata$Cell_Subtype == "T_cells",]$Sample_ID)
+```
+
+```{r read in the TCGA data and EDec proportions}
+TCGA.Beta = read.table("HiSeqV2_TCGA.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+TCGA.Beta = (2^TCGA.Beta)-1
+TCGA.Beta = TCGA.Beta[rowSums(TCGA.Beta) > 0,]
+
+TCGA.Metadata = read.table("BRCA_clinicalMatrix_New.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+TCGA.Metadata = TCGA.Metadata[TCGA.Metadata$sampleID %in% colnames(TCGA.Beta),]
+TCGA.Metadata = TCGA.Metadata[match(colnames(TCGA.Beta), TCGA.Metadata$sampleID),]
+
+EDec.Proportions = read.table("TCGA_VitorProportions.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+interTCGA.samples = intersect(rownames(EDec.Proportions), colnames(TCGA.Beta))
+EDec.Proportions = EDec.Proportions[interTCGA.samples,]
+EDec.Proportions$Cancer = EDec.Proportions$`Cancerous Epithelial 1` + EDec.Proportions$`Cancerous Epithelial 2` + EDec.Proportions$`Cancerous Epithelial 3` + EDec.Proportions$`Cancerous Epithelial 4` + EDec.Proportions$`Cancerous Epithelial 5`
+EDec.Proportions$`Cancerous Epithelial 1` = NULL
+EDec.Proportions$`Cancerous Epithelial 2` = NULL
+EDec.Proportions$`Cancerous Epithelial 3` = NULL
+EDec.Proportions$`Cancerous Epithelial 4` = NULL
+EDec.Proportions$`Cancerous Epithelial 5` = NULL
+EDec.Proportions$Samples = rownames(EDec.Proportions)
+colnames(EDec.Proportions) = c("Epithelial","Stromal","Immune","Cancer","Samples")
+```
+
+```{r load TCGA metadata}
+TCGA.Metadata.subtypes = as.character(TCGA.Metadata$PAM50Call_New)
+TCGA.table.colors = rep("white", length(TCGA.Metadata.subtypes))
+TCGA.table.colors[TCGA.Metadata.subtypes=="Control"] = "pink"
+TCGA.table.colors[TCGA.Metadata.subtypes=="Normal"] = "purple"
+TCGA.table.colors[TCGA.Metadata.subtypes=="Basal"] = "red"
+TCGA.table.colors[TCGA.Metadata.subtypes=="LumA"] = "green"
+TCGA.table.colors[TCGA.Metadata.subtypes=="LumB"] = "yellow"
+TCGA.table.colors[TCGA.Metadata.subtypes=="HER2"] = "blue"
+
+TCGA.Control.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "Control",]$sampleID)
+TCGA.Normal.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "Normal",]$sampleID)
+TCGA.Basal.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "Basal",]$sampleID)
+TCGA.LumA.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "LumA",]$sampleID)
+TCGA.LumB.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "LumB",]$sampleID)
+TCGA.Her2.samples = as.character(TCGA.Metadata[TCGA.Metadata$PAM50Call_New == "Her2",]$sampleID)
+```
+
+```{r GEO refs normalization with TCGA}
+GEO.TCGA.genes = intersect(rownames(GEO.Beta), rownames(TCGA.Beta))
+TCGA.Beta = TCGA.Beta[GEO.TCGA.genes,]
+TCGA.Beta = as.data.frame(TCGA.Beta)
+TCGA.Beta$Genes = rownames(TCGA.Beta)
+
+GEO.Beta = GEO.Beta[GEO.TCGA.genes,]
+GEO.Beta = as.data.frame(GEO.Beta)
+GEO.Beta$Genes = rownames(GEO.Beta)
+
+input.allrnaseq  = merge(GEO.Beta, TCGA.Beta, by = "Genes")
+rownames(input.allrnaseq) = input.allrnaseq$Genes
+input.allrnaseq$Genes = NULL
+input.allrnaseq.trans = t(input.allrnaseq)
+input.allrnaseq.trans.QN = as.data.frame(t(quantile_normalisation(input.allrnaseq.trans)))
+input.allrnaseq.trans.QN.logistic = t(apply(t(input.allrnaseq.trans.QN), 2, logistic.a100))
+input.allrnaseq.trans.QN.logistic.nonZero =  input.allrnaseq.trans.QN.logistic[rowSums(input.allrnaseq.trans.QN.logistic[,]) > 0, ]
+input.allrnaseq.trans.QN.logistic.nonZero.max = (1/max(input.allrnaseq.trans.QN.logistic.nonZero)) * input.allrnaseq.trans.QN.logistic.nonZero
+
+TCGA.Beta$Genes = NULL
+GEO.Beta$Genes = NULL
+
+GEO.Beta.Trans = input.allrnaseq.trans.QN.logistic.nonZero.max[,colnames(GEO.Beta)]
+TCGA.Beta.Trans = input.allrnaseq.trans.QN.logistic.nonZero.max[,colnames(TCGA.Beta)]
+
+TCGA.Beta.Trans.DF = as.data.frame(TCGA.Beta.Trans)
+TCGA.Beta.Trans.DF$average = rowMeans(TCGA.Beta.Trans.DF)
+TCGA.Expressed = TCGA.Beta.Trans.DF[,"average", drop = FALSE]
+TCGA.Expressed = TCGA.Expressed[TCGA.Expressed$average >= 0.01,,drop = FALSE]
+TCGA.Expressed = rownames(TCGA.Expressed)
+
+GEO.Beta.Trans = GEO.Beta.Trans[TCGA.Expressed,]
+TCGA.Beta.Trans = TCGA.Beta.Trans[TCGA.Expressed,]
+TCGA.Beta.GEO.Refs = cbind(TCGA.Beta.Trans, GEO.Beta.Trans[,c(NormalEpithelial.Profiles[1:4], Immune.Profiles[1:5], Stromal.Profiles)])
+```
+
+####Cell line deconvolution---
+
+```{r Stage 0 - Cell lines}
+GEO.Subtypes.Model = c("epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","B_cells","DC","monocytes","CD56+_NK","T_cells","B_cells","DC","monocytes","CD56+_NK","T_cells","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","epithelial","CAF","CAF","CAF","CAF")
+GEO.Colors.Model = rep("white", length(GEO.Subtypes.Model))
+GEO.Colors.Model[GEO.Subtypes.Model=="epithelial"] = "black"
+GEO.Colors.Model[GEO.Subtypes.Model=="CAF"] = "green"
+GEO.Colors.Model[GEO.Subtypes.Model=="B_cells"] = "blue"
+GEO.Colors.Model[GEO.Subtypes.Model=="DC"] = "aquamarine"
+GEO.Colors.Model[GEO.Subtypes.Model=="monocytes"] = "navy"
+GEO.Colors.Model[GEO.Subtypes.Model=="CD56+_NK"] = "darkslategray2"
+GEO.Colors.Model[GEO.Subtypes.Model=="T_cells"] = "royalblue3"
+
+tTestOneVsRest.GEO.7 = perform_t_tests_all_classes_one_vs_rest(dataMatrix = GEO.Beta.Trans, classVector = GEO.Subtypes.Model7)
+tTestEachPair.GEO.7 = perform_t_tests_all_classes_each_pair(dataMatrix = GEO.Beta.Trans, classVector = GEO.Subtypes.Model7)
+
+chosenProbes.one.GEO.7 = c()
+for(i in 1:7){
+  sigProbes.GEO.7 = row.names(tTestOneVsRest.GEO.7$P.Values[tTestOneVsRest.GEO.7$P.Values[,i] < 1e-4,])
+  sigDiff.GEO.7 = tTestOneVsRest.GEO.7$Difference.Between.Means[which(row.names(tTestOneVsRest.GEO.7$P.Values) %in% sigProbes.GEO.7), i]
+  highDiffProbes.GEO.7 = names(tail(sort(sigDiff.GEO.7), 25))
+  lowDiffProbes.GEO.7 = names(head(sort(sigDiff.GEO.7), 25))
+  chosenProbes.one.GEO.7 = c(chosenProbes.one.GEO.7, highDiffProbes.GEO.7, lowDiffProbes.GEO.7)
+  print(c(highDiffProbes.GEO.7, lowDiffProbes.GEO.7))
+}
+id.one.GEO.7 = duplicated(chosenProbes.one.GEO.7)
+chosenProbes.one.dup.GEO.7 = chosenProbes.one.GEO.7[!id.one.GEO.7] 
+
+# Epithelial vs  CAF
+chosenProbes.pair.GEO.7  = c()
+for(j in c(6)){
+  sigProbes.pair.GEO.7  = row.names(tTestEachPair.GEO.7$P.Values[tTestEachPair.GEO.7$P.Values[,j] < 1e-5,])
+  sigDiff.pair.GEO.7  = tTestEachPair.GEO.7$Difference.Between.Means[which(row.names(tTestEachPair.GEO.7$P.Values) %in% sigProbes.pair.GEO.7), j]
+  highDiffProbes.pair.GEO.7  = names(tail(sort(sigDiff.pair.GEO.7), 75))
+  lowDiffProbes.pair.GEO.7  = names(head(sort(sigDiff.pair.GEO.7), 75))
+  chosenProbes.pair.GEO.7  = c(chosenProbes.pair.GEO.7 , highDiffProbes.pair.GEO.7 , lowDiffProbes.pair.GEO.7 )
+}
+id.pair.GEO.7 = duplicated(chosenProbes.pair.GEO.7)
+chosenProbes.pair.dup.GEO.7 = chosenProbes.pair.GEO.7[!id.pair.GEO.7]
+
+chosenProbes.GEO.7 = union(chosenProbes.one.dup.GEO.7, chosenProbes.pair.dup.GEO.7)
+GEO.7.Beta.Trans.chosenProbes = GEO.Beta.Trans[chosenProbes.GEO.7,]
+```
+
+```{r plot Stage 0  - Cell lines}
+heatmap.2(as.matrix(GEO.7.Beta.Trans.chosenProbes),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, key = FALSE, labRow = FALSE,
+          ColSideColors = GEO.Colors.Model, labCol = colnames(GEO.7.Beta.Trans.chosenProbes), margins = c(10,10))
+```
+
+```{r Stage 1 - Cell lines}
+Pam50.Genes = c("UBE2T","BIRC5","NUF2","CDC6","CCNB1","TYMS","MYBL2","CEP55","MELK","NDC80","RRM2","UBE2C","CENPF","PTTG1","EXO1","ANLN","CCNE1","CDC20","MKI67","KIF2C","ACTR3B","MYC","EGFR","KRT5","PHGDH","CDH3","MIA","KRT17","FOXC1","SFRP1","KRT14","ESR1","SLC39A6","BAG1","MAPT","PGR","CXXC5","MLPH","BCL2","MDM2","NAT1","FOXA1","BLVRA","MMP11","GPR160","FGFR4","GRB7","TMEM45B","ERBB2")
+chosenProbes.GEO.7.PAM50 = c(chosenProbes.GEO.7, Pam50.Genes)
+
+TCGA.BRCA.k.cell.lines = 6
+XDec.TCGA.cell.lines = run_edec_stage_1(meth_bulk_samples = TCGA.Beta.GEO.Refs, informative_loci = chosenProbes.GEO.7.PAM50, num_cell_types = TCGA.BRCA.k.cell.lines, max_its = 2000, rss_diff_stop = 1e-10)
+
+XDec.TCGA.cell.lines.norm.gene = XDec.TCGA.cell.lines$methylation
+XDec.TCGA.cell.lines.norm.gene.probes = XDec.TCGA.cell.lines.norm.gene[chosenProbes.GEO.7,]
+
+XDec.TCGA.cell.lines.norm.gene.names = NULL
+for(i in 1:TCGA.BRCA.k){XDec.TCGA.cell.lines.norm.gene.names = c(XDec.TCGA.cell.lines.norm.gene.names, paste("Profile_",i,sep = ""))}
+colnames(XDec.TCGA.cell.lines.norm.gene.probes) = XDec.TCGA.cell.lines.norm.gene.names
+
+Corr.TCGA.probes.cell.lines = cor(GEO.7.Beta.Trans.chosenProbes, XDec.TCGA.cell.lines.norm.gene.probes, use = "complete", method = "spearman")
+Prop.TCGA.cell.lines = as.data.frame(XDec.TCGA.cell.lines$proportions)[colnames(TCGA.Beta),]
+colnames(Prop.TCGA.cell.lines) = XDec.TCGA.cell.lines.norm.gene.names
+```
+
+```{r plot Stage 1 - Cell lines}
+heatmap.2(as.matrix(Corr.TCGA.probes.cell.lines),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, RowSideColors = GEO.Colors.Model, key = FALSE,labCol = colnames(XDec.TCGA.cell.lines.norm.gene.probes), cexCol = 2, Colv = TRUE, margins = c(10,10))
+#This plot allows us to assign cell types to profiles
+```
+
+```{r assign cell types - Cell lines}
+colnames(Corr.TCGA.probes.cell.lines) = c("epithelial_1","myeliod","stromal","epithelial_2","lymphoid","epithelial_3")
+
+colnames(XDec.TCGA.cell.lines.norm.gene.probes) = c("epithelial_1","myeliod","stromal","epithelial_2","lymphoid","epithelial_3")
+
+colnames(Prop.TCGA.cell.lines.subset) = c("epithelial_1","myeliod","stromal","epithelial_2","lymphoid","epithelial_3")
+
+```
+
+```{r TCGA Metadata}
+TCGA.Metadata.Subset = TCGA.Metadata
+TCGA.Metadata.Subset = TCGA.Metadata.Subset[!TCGA.Metadata.Subset$PAM50Call_New == '',]
+TCGA.Metadata.Subset.Samples = as.character(TCGA.Metadata.Subset$sampleID)
+Prop.TCGA.cell.lines.subset = Prop.TCGA.cell.lines[TCGA.Metadata.Subset.Samples,]
+
+TCGA.Metadata.subtypes.subset = as.character(TCGA.Metadata.Subset$PAM50Call_New)
+TCGA.table.colors = rep("white", length(TCGA.Metadata.subtypes.subset))
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="Control"] = "pink"
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="Normal"] = "purple"
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="Basal"] = "red"
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="LumA"] = "green"
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="LumB"] = "yellow"
+TCGA.table.colors[TCGA.Metadata.subtypes.subset=="Her2"] = "blue"
+
+TCGA.Metadata.Her2.subset = as.character(TCGA.Metadata.Subset$HER2_Final_Status_nature2012)
+TCGA.table.colors.2 = rep("white", length(TCGA.Metadata.Her2.subset))
+TCGA.table.colors.2[TCGA.Metadata.Her2.subset=="Negative"] = "black"
+TCGA.table.colors.2[TCGA.Metadata.Her2.subset=="Positive"] = "red"
+```
+
+```{r plot proportions - Cell lines}
+heatmap.2(as.matrix(t(Prop.TCGA.cell.lines.subset)),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, ColSideColors = TCGA.table.colors, key = FALSE,labCol = FALSE, cexRow = 2, Colv = TRUE, margins = c(10,10))
+```
+
+```{r compare XDec cell lines and EDec}
+Prop.TCGA.cell.lines.subset.EDec = Prop.TCGA.cell.lines.subset[interTCGA.samples,]
+Prop.TCGA.cell.lines.subset.EDec$Samples = rownames(Prop.TCGA.cell.lines.subset.EDec)
+colnames(EDec.Proportions)[1:4] = paste("EDec",colnames(EDec.Proportions)[1:4],sep = "_")
+Prop.TCGA.cell.lines.subset.EDec.All = merge(Prop.TCGA.cell.lines.subset.EDec, EDec.Proportions, by = "Samples")
+
+XDec.Stroma = Prop.TCGA.cell.lines.subset.EDec.All$stromal
+EDec.Stroma = Prop.TCGA.cell.lines.subset.EDec.All$EDec_Stromal
+
+XDec.Immune = Prop.TCGA.cell.lines.subset.EDec.All$myeliod + Prop.TCGA.cell.lines.subset.EDec.All$lymphoid
+EDec.Immune = Prop.TCGA.cell.lines.subset.EDec.All$EDec_Immune
+XDec.Epi = Prop.TCGA.cell.lines.subset.EDec.All$epithelial_1 + Prop.TCGA.cell.lines.subset.EDec.All$epithelial_2 + Prop.TCGA.cell.lines.subset.EDec.All$epithelial_3
+EDec.Epi = Prop.TCGA.cell.lines.subset.EDec.All$EDec_Cancer + Prop.TCGA.cell.lines.subset.EDec.All$EDec_Epithelial
+
+XDec.EDec.Stroma.lm = lm(XDec.Stroma ~ -1 + EDec.Stroma)
+XDec.EDec.Immune.lm = lm(XDec.Immune ~ -1 + EDec.Immune)
+XDec.EDec.Epi.lm = lm(XDec.Epi ~ -1 + EDec.Epi)
+```
+
+```{r plot correlation EDec/XDec cell lines}
+plot(Prop.TCGA.cell.lines.subset.EDec.All$EDec_Stromal, Prop.TCGA.cell.lines.subset.EDec.All$stromal, xlim = c(0,1), ylim = c(0,1), xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.EDec.Stroma.lm, col = "green")
+points(Prop.TCGA.cell.lines.subset.EDec.All$EDec_Immune, Prop.TCGA.cell.lines.subset.EDec.All$myeliod + Prop.TCGA.cell.lines.subset.EDec.All$lymphoid, xlim = c(0,1), ylim = c(0,1), main = "Immune", xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.EDec.Immune.lm, col = "blue")
+points(Prop.TCGA.cell.lines.subset.EDec.All$EDec_Cancer + Prop.TCGA.cell.lines.subset.EDec.All$EDec_Epithelial, Prop.TCGA.cell.lines.subset.EDec.All$epithelial_1 + Prop.TCGA.cell.lines.subset.EDec.All$epithelial_2 + Prop.TCGA.cell.lines.subset.EDec.All$epithelial_3, xlim = c(0,1), ylim = c(0,1), main = "Epithelial", xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.EDec.Epi.lm, col = "black")
+```
+
+###Single Cell Deconvolution Stage 0 and 1 -----
+
+```{r preprocess scRNA references}
+GSE118389.RSEM = read.table(file = "GSE118389_counts_rsem.txt", quote = "\"", sep = "\t", check.names = FALSE, comment.char = "!", header = TRUE, row.names = 1)
+GSE118389.CellType.Meta = read.table(file = "SingleCell/GSE118389_Metadata.txt", quote = "\"", sep = "\t", check.names = FALSE, comment.char = "!", header = TRUE, row.names = 1)
+
+GSE118389.CellType.Epithelial = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Type == "Epithelial",]$Sample)
+GSE118389.CellType.Stroma = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Type == "Stroma",]$Sample)
+GSE118389.CellType.Endothelial = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Type == "Endothelial",]$Sample)
+GSE118389.CellType.Immune = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Type == "Immune",]$Sample)
+GSE118389.CellType.Tcell = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Subtype == "Tcell",]$Sample)
+GSE118389.CellType.Bcell = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Subtype == "Bcell",]$Sample)
+GSE118389.CellType.Macrophage = as.vector(GSE118389.CellType.Meta[GSE118389.CellType.Meta$Cell_Subtype == "macrophage",]$Sample)
+
+GSE118389.Markers = c("EPCAM","EGFR","CDH1","KRT14","ITGA6","KRT5","TP63","KRT17","MME","KRT8","KRT18","KRT19","FOXA1","GATA3","MUC1","CD24","KIT","GABRP","FAP","COL1A1","COL3A1","COL5A1","ACTA2","TAGLN","LUM","FBLN1","COL6A3","COL1A2","COL6A1","COL6A2","PECAM1","VWF","CDH5","SELE","PTPRC","CD2","CD3D","CD3E","CD3G","CD8A","CD8B","MS4A1","CD79A","CD79B","BLNK","CD14","CD68","CD163","CSF1R")
+
+## Reorder Epithelial based on library size and sum every 10 samples
+GSE118389.RSEM.Epithelial = GSE118389.RSEM[,GSE118389.CellType.Epithelial]
+Less100K.Epithelial = colSums(GSE118389.RSEM.Epithelial) > 100000
+GSE118389.RSEM.Epithelial = GSE118389.RSEM.Epithelial[,Less100K.Epithelial]
+#Remove with low coverage
+GSE118389.RSEM.Epithelial = GSE118389.RSEM.Epithelial[,names(sort(colSums(GSE118389.RSEM.Epithelial), decreasing = TRUE))]
+GSE118389.RSEM.Epithelial = GSE118389.RSEM.Epithelial[,1:640]
+
+GSE118389.RSEM.Epithelial.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Epithelial), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Epithelial[indx[indx <= ncol(GSE118389.RSEM.Epithelial)]])}))
+GSE118389.RSEM.Epithelial.Sum = as.data.frame(t(GSE118389.RSEM.Epithelial.Sum))
+
+names.Epithelial = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Epithelial.Sum))){
+  names.Epithelial.temp = paste("Epithelial.P", i, sep = "")
+  names.Epithelial = c(names.Epithelial, names.Epithelial.temp)
+}
+colnames(GSE118389.RSEM.Epithelial.Sum) = names.Epithelial
+
+## Reorder Stroma based on library size and sum every 5 samples
+GSE118389.RSEM.Stroma = GSE118389.RSEM[,GSE118389.CellType.Stroma]
+Less100K.Stroma = colSums(GSE118389.RSEM.Stroma) > 100000
+GSE118389.RSEM.Stroma = GSE118389.RSEM.Stroma[,Less100K.Stroma]
+GSE118389.RSEM.Stroma = GSE118389.RSEM.Stroma[,names(sort(colSums(GSE118389.RSEM.Stroma), decreasing = TRUE))]
+GSE118389.RSEM.Stroma = GSE118389.RSEM.Stroma[,1:90]
+
+GSE118389.RSEM.Stroma.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Stroma), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Stroma[indx[indx <= ncol(GSE118389.RSEM.Stroma)]])}))
+GSE118389.RSEM.Stroma.Sum = as.data.frame(t(GSE118389.RSEM.Stroma.Sum))
+
+names.Stroma = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Stroma.Sum))){
+  names.Stroma.temp = paste("Stroma.P", i, sep = "")
+  names.Stroma = c(names.Stroma, names.Stroma.temp)
+}
+colnames(GSE118389.RSEM.Stroma.Sum) = names.Stroma
+
+## Reorder Endothelial based on library size and sum every 10 samples
+GSE118389.RSEM.Endothelial = GSE118389.RSEM[,GSE118389.CellType.Endothelial]
+Less100K.Endothelial = colSums(GSE118389.RSEM.Endothelial) > 100000
+GSE118389.RSEM.Endothelial = GSE118389.RSEM.Endothelial[,Less100K.Endothelial]
+GSE118389.RSEM.Endothelial = GSE118389.RSEM.Endothelial[,names(sort(colSums(GSE118389.RSEM.Endothelial), decreasing = TRUE))]
+GSE118389.RSEM.Endothelial = GSE118389.RSEM.Endothelial[,1:10]
+
+GSE118389.RSEM.Endothelial.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Endothelial), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Endothelial[indx[indx <= ncol(GSE118389.RSEM.Endothelial)]])}))
+GSE118389.RSEM.Endothelial.Sum = as.data.frame(t(GSE118389.RSEM.Endothelial.Sum))
+
+names.Endothelial = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Endothelial.Sum))){
+  names.Endothelial.temp = paste("Endothelial.P", i, sep = "")
+  names.Endothelial = c(names.Endothelial, names.Endothelial.temp)
+}
+colnames(GSE118389.RSEM.Endothelial.Sum) = names.Endothelial
+
+## Reorder Tcell based on library size and sum every 10 samples
+GSE118389.RSEM.Tcell = GSE118389.RSEM[,GSE118389.CellType.Tcell]
+Less100K.Tcell = colSums(GSE118389.RSEM.Tcell) > 100000
+GSE118389.RSEM.Tcell = GSE118389.RSEM.Tcell[,Less100K.Tcell]
+GSE118389.RSEM.Tcell = GSE118389.RSEM.Tcell[,names(sort(colSums(GSE118389.RSEM.Tcell), decreasing = TRUE))]
+GSE118389.RSEM.Tcell = GSE118389.RSEM.Tcell[,1:50]
+
+GSE118389.RSEM.Tcell.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Tcell), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Tcell[indx[indx <= ncol(GSE118389.RSEM.Tcell)]])}))
+GSE118389.RSEM.Tcell.Sum = as.data.frame(t(GSE118389.RSEM.Tcell.Sum))
+
+names.Tcell = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Tcell.Sum))){
+  names.Tcell.temp = paste("Tcell.P", i, sep = "")
+  names.Tcell = c(names.Tcell, names.Tcell.temp)
+}
+colnames(GSE118389.RSEM.Tcell.Sum) = names.Tcell
+
+## Reorder Bcell based on library size and sum every 10 samples
+GSE118389.RSEM.Bcell = GSE118389.RSEM[,GSE118389.CellType.Bcell]
+Less100K.Bcell = colSums(GSE118389.RSEM.Bcell) > 100000
+GSE118389.RSEM.Bcell = GSE118389.RSEM.Bcell[,Less100K.Bcell]
+GSE118389.RSEM.Bcell = GSE118389.RSEM.Bcell[,names(sort(colSums(GSE118389.RSEM.Bcell), decreasing = TRUE))]
+GSE118389.RSEM.Bcell = GSE118389.RSEM.Bcell[,1:15]
+
+GSE118389.RSEM.Bcell.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Bcell), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Bcell[indx[indx <= ncol(GSE118389.RSEM.Bcell)]])}))
+GSE118389.RSEM.Bcell.Sum = as.data.frame(t(GSE118389.RSEM.Bcell.Sum))
+
+names.Bcell = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Bcell.Sum))){
+  names.Bcell.temp = paste("Bcell.P", i, sep = "")
+  names.Bcell = c(names.Bcell, names.Bcell.temp)
+}
+colnames(GSE118389.RSEM.Bcell.Sum) = names.Bcell
+
+## Reorder Macrophage based on library size and sum every 10 samples
+GSE118389.RSEM.Macrophage = GSE118389.RSEM[,GSE118389.CellType.Macrophage]
+Less100K.Macrophage = colSums(GSE118389.RSEM.Macrophage) > 100000
+GSE118389.RSEM.Macrophage = GSE118389.RSEM.Macrophage[,Less100K.Macrophage]
+GSE118389.RSEM.Macrophage = GSE118389.RSEM.Macrophage[,names(sort(colSums(GSE118389.RSEM.Macrophage), decreasing = TRUE))]
+GSE118389.RSEM.Macrophage = GSE118389.RSEM.Macrophage[,1:60]
+
+GSE118389.RSEM.Macrophage.Sum = t(sapply(seq(1,ncol(GSE118389.RSEM.Macrophage), by = 5), function(i) {
+  indx <- i:(i+4)
+  rowSums(GSE118389.RSEM.Macrophage[indx[indx <= ncol(GSE118389.RSEM.Macrophage)]])}))
+GSE118389.RSEM.Macrophage.Sum = as.data.frame(t(GSE118389.RSEM.Macrophage.Sum))
+
+names.Macrophage = NULL
+for(i in 1:length(colnames(GSE118389.RSEM.Macrophage.Sum))){
+  names.Macrophage.temp = paste("Macrophage.P", i, sep = "")
+  names.Macrophage = c(names.Macrophage, names.Macrophage.temp)
+}
+colnames(GSE118389.RSEM.Macrophage.Sum) = names.Macrophage
+
+## Combine Sums
+GSE118389.Combined = cbind(GSE118389.RSEM.Epithelial, GSE118389.RSEM.Stroma, GSE118389.RSEM.Tcell, GSE118389.RSEM.Macrophage)
+GSE118389.CombinedSums = cbind(GSE118389.RSEM.Epithelial.Sum, GSE118389.RSEM.Stroma.Sum, GSE118389.RSEM.Tcell.Sum, GSE118389.RSEM.Macrophage.Sum)
+GSE118389.CombinedSums = GSE118389.CombinedSums[rowSums(GSE118389.CombinedSums) > 0,]
+
+plot(colSums(GSE118389.Combined))
+
+## Normalized Counts
+GSE118389.RSEM.Epithelial.Sum.Norm = GSE118389.RSEM.Epithelial.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Epithelial.Sum.Norm))){
+  GSE118389.RSEM.Epithelial.Sum.Norm[i] = GSE118389.RSEM.Epithelial.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Epithelial.Sum.Norm[i]))
+}
+
+GSE118389.RSEM.Stroma.Sum.Norm = GSE118389.RSEM.Stroma.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Stroma.Sum.Norm))){
+  GSE118389.RSEM.Stroma.Sum.Norm[i] = GSE118389.RSEM.Stroma.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Stroma.Sum.Norm[i]))
+}
+
+GSE118389.RSEM.Endothelial.Sum.Norm = GSE118389.RSEM.Endothelial.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Endothelial.Sum.Norm))){
+  GSE118389.RSEM.Endothelial.Sum.Norm[i] = GSE118389.RSEM.Endothelial.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Endothelial.Sum.Norm[i]))
+}
+
+GSE118389.RSEM.Tcell.Sum.Norm = GSE118389.RSEM.Tcell.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Tcell.Sum.Norm))){
+  GSE118389.RSEM.Tcell.Sum.Norm[i] = GSE118389.RSEM.Tcell.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Tcell.Sum.Norm[i]))
+}
+
+GSE118389.RSEM.Bcell.Sum.Norm = GSE118389.RSEM.Bcell.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Bcell.Sum.Norm))){
+  GSE118389.RSEM.Bcell.Sum.Norm[i] = GSE118389.RSEM.Bcell.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Bcell.Sum.Norm[i]))
+}
+
+GSE118389.RSEM.Macrophage.Sum.Norm = GSE118389.RSEM.Macrophage.Sum
+for(i in 1:length(colnames(GSE118389.RSEM.Macrophage.Sum.Norm))){
+  GSE118389.RSEM.Macrophage.Sum.Norm[i] = GSE118389.RSEM.Macrophage.Sum.Norm[i] * (colSums(GSE118389.RSEM.Epithelial.Sum.Norm)[1]/colSums(GSE118389.RSEM.Macrophage.Sum.Norm[i]))
+}
+
+GSE118389.CombinedSums.Norm = cbind(GSE118389.RSEM.Epithelial.Sum.Norm, GSE118389.RSEM.Stroma.Sum.Norm, GSE118389.RSEM.Tcell.Sum.Norm, GSE118389.RSEM.Macrophage.Sum.Norm)
+GSE118389.CombinedSums.Norm = GSE118389.CombinedSums.Norm[rowSums(GSE118389.CombinedSums.Norm) > 0,]
+```
+
+```{r normalize scRNA references}
+GSE118389.Subtypes = gsub(pattern = "\\.P\\d+", replacement = "", colnames(GSE118389.CombinedSums.Norm))
+GSE118389.Colors = rep("white", length(GSE118389.Subtypes))
+GSE118389.Colors[GSE118389.Subtypes=="Epithelial"] = "black"
+GSE118389.Colors[GSE118389.Subtypes=="Stroma"] = "green"
+GSE118389.Colors[GSE118389.Subtypes=="Endothelial"] = "lightgreen"
+GSE118389.Colors[GSE118389.Subtypes=="Tcell"] = "blue"
+GSE118389.Colors[GSE118389.Subtypes=="Bcell"] = "lightblue"
+GSE118389.Colors[GSE118389.Subtypes=="Macrophage"] = "navy"
+
+input.SC.trans.QN.logistic = t(apply(t(GSE118389.CombinedSums.Norm), 2, logistic.a100))
+input.SC.trans.QN.logistic.nonZero =  input.SC.trans.QN.logistic[rowSums(input.SC.trans.QN.logistic[,]) > 0, ]
+input.SC.trans.QN.logistic.nonZero.max = (1/max(input.SC.trans.QN.logistic.nonZero)) * input.SC.trans.QN.logistic.nonZero
+
+GSE118389.CombinedSums.Norm.Trans = input.SC.trans.QN.logistic.nonZero.max
+GSE118389.Markers.Int = intersect(GSE118389.Markers, rownames(GSE118389.CombinedSums.Norm.Trans))
+GSE118389.CombinedSums.Norm.Trans.Markers = GSE118389.CombinedSums.Norm.Trans[GSE118389.Markers.Int,]
+
+heatmap.2(as.matrix(GSE118389.CombinedSums.Norm.Trans.Markers),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, key = FALSE, Rowv = FALSE, Colv = FALSE,
+          labRow = rownames(GSE118389.CombinedSums.Norm.Trans.Markers), labCol = FALSE, margins = c(10,10))
+
+
+#TSNE visualization of different cell types 
+norm_ref = GSE118389.CombinedSums.Norm.Trans[GSE118389.Markers.Int,]
+norm_ref_t_ct = as.data.frame(t(norm_ref))
+norm_ref_t_ct$cell_type = GSE118389.Subtypes
+
+autoplot(prcomp(t(norm_ref)),
+         data = norm_ref_t_ct,
+         colour = 'cell_type',
+         label = FALSE,
+         main = "ReferencesSC")
+```
+
+```{r Stage 0 - Single Cell}
+tTestOneVsRest.SC = perform_t_tests_all_classes_one_vs_rest(dataMatrix = GSE118389.CombinedSums.Norm.Trans, classVector = GSE118389.Subtypes)
+tTestEachPair.SC = perform_t_tests_all_classes_each_pair(dataMatrix = GSE118389.CombinedSums.Norm.Trans, classVector = GSE118389.Subtypes)
+
+chosenProbes.one.SC = c()
+for(i in 1:4){
+  sigProbes.SC = row.names(tTestOneVsRest.SC$P.Values[tTestOneVsRest.SC$P.Values[,i] < 0.05,])
+  sigDiff.SC = tTestOneVsRest.SC$Difference.Between.Means[which(row.names(tTestOneVsRest.SC$P.Values) %in% sigProbes.SC), i]
+  highDiffProbes.SC = names(tail(sort(sigDiff.SC), 50))
+  lowDiffProbes.SC = names(head(sort(sigDiff.SC), 50))
+  chosenProbes.one.SC = c(chosenProbes.one.SC, highDiffProbes.SC, lowDiffProbes.SC)
+}
+id.one.SC = duplicated(chosenProbes.one.SC)
+chosenProbes.one.dup.SC = chosenProbes.one.SC[!id.one.SC] 
+
+chosenProbes.pair.SC  = c()
+for(j in c(6)){
+  sigProbes.pair.SC  = row.names(tTestEachPair.SC$P.Values[tTestEachPair.SC$P.Values[,j] < 0.05,])
+  sigDiff.pair.SC  = tTestEachPair.SC$Difference.Between.Means[which(row.names(tTestEachPair.SC$P.Values) %in% sigProbes.pair.SC), j]
+  highDiffProbes.pair.SC  = names(tail(sort(sigDiff.pair.SC), 25))
+  lowDiffProbes.pair.SC  = names(head(sort(sigDiff.pair.SC), 25))
+  chosenProbes.pair.SC  = c(chosenProbes.pair.SC , highDiffProbes.pair.SC , lowDiffProbes.pair.SC )
+}
+id.pair.SC <- duplicated(chosenProbes.pair.SC) | duplicated(chosenProbes.pair.SC, fromLast = TRUE) 
+chosenProbes.pair.dup.SC = chosenProbes.pair.SC[!id.pair.SC]
+
+chosenProbes.pair.SC  = c()
+for(j in c(6)){
+  sigProbes.pair.SC  = row.names(tTestEachPair.SC$P.Values[tTestEachPair.SC$P.Values[,j] < 0.05,])
+  sigDiff.pair.SC  = tTestEachPair.SC$Difference.Between.Means[which(row.names(tTestEachPair.SC$P.Values) %in% sigProbes.pair.SC), j]
+  highDiffProbes.pair.SC  = names(tail(sort(sigDiff.pair.SC), 25))
+  lowDiffProbes.pair.SC  = names(head(sort(sigDiff.pair.SC), 25))
+  chosenProbes.pair.SC  = c(chosenProbes.pair.SC , highDiffProbes.pair.SC , lowDiffProbes.pair.SC )
+}
+id.pair.SC <- duplicated(chosenProbes.pair.SC) | duplicated(chosenProbes.pair.SC, fromLast = TRUE) 
+chosenProbes.pair.dup.SC = chosenProbes.pair.SC[!id.pair.SC]
+
+
+
+chosenProbes.SC = union(chosenProbes.one.dup.SC, chosenProbes.pair.dup.SC)
+chosenProbes.SC = intersect(rownames(TCGA.Beta.Trans), chosenProbes.SC)
+
+
+```
+
+```{r plot Stage 0 - Single Cell}
+Pam50.Genes = c("UBE2T","BIRC5","NUF2","CDC6","CCNB1","TYMS","MYBL2","CEP55","MELK","NDC80","RRM2","UBE2C","CENPF","PTTG1","EXO1","ANLN","CCNE1","CDC20","MKI67","KIF2C","ACTR3B","MYC","EGFR","KRT5","PHGDH","CDH3","MIA","KRT17","FOXC1","SFRP1","KRT14","ESR1","SLC39A6","BAG1","MAPT","PGR","CXXC5","MLPH","BCL2","MDM2","NAT1","FOXA1","BLVRA","MMP11","GPR160","FGFR4","GRB7","TMEM45B","ERBB2")
+chosenProbes.SC.PAM50 = union(chosenProbes.SC, Pam50.Genes)
+
+SC.Beta.Trans.chosenProbes = GSE118389.CombinedSums.Norm.Trans[chosenProbes.SC,]
+
+heatmap.2(as.matrix(SC.Beta.Trans.chosenProbes),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, key = FALSE, labRow = FALSE,
+          ColSideColors = GSE118389.Colors, labCol = colnames(SC.Beta.Trans.chosenProbes), margins = c(10,10))
+
+#write.table(chosenProbes.SC.PAM50,"single_cell_probes.txt")
+#write.table(GSE118389.CombinedSums.Norm.Trans[chosenProbes.SC,],"single_cell_probes_exp.txt")
+```
+
+```{r Stage 1 - Single Cell}
+sc.num = 9
+XDec.TCGA.SC.Model = run_edec_stage_1(meth_bulk_samples = TCGA.Beta.Trans, informative_loci = chosenProbes.SC.PAM50, num_cell_types = sc.num, max_its = 2000, rss_diff_stop = 1e-10)
+XDec.TCGA.SC.Model.norm.gene = XDec.TCGA.SC.Model$methylation
+XDec.TCGA.SC.Model.norm.gene.chosenProbes = XDec.TCGA.SC.Model.norm.gene[chosenProbes.SC,]
+
+XDec.TCGA.SC.Model.Names = NULL
+for(i in 1:sc.num){XDec.TCGA.SC.Model.Names = c(XDec.TCGA.SC.Model.Names, paste("Profile_",i,sep = ""))}
+colnames(XDec.TCGA.SC.Model.norm.gene.chosenProbes) = XDec.TCGA.SC.Model.Names
+
+Corr.TCGA.SC.Model = cor(SC.Beta.Trans.chosenProbes, XDec.TCGA.SC.Model.norm.gene.chosenProbes, use = "complete", method = "spearman")
+Prop.TCGA.SC.Model = as.data.frame(XDec.TCGA.SC.Model$proportions)[colnames(TCGA.Beta.Trans),]
+colnames(Prop.TCGA.SC.Model) = XDec.TCGA.SC.Model.Names
+Prop.TCGA.SC.Model.Subset = Prop.TCGA.SC.Model[TCGA.Metadata.Subset.Samples,]
+```
+
+```{r plot Stage 1 - Single cell }
+heatmap.2(as.matrix(Corr.TCGA.SC.Model),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, RowSideColors = GSE118389.Colors, key = FALSE,
+          labCol = colnames(XDec.TCGA.SC.Model.norm.gene.chosenProbes), cexCol = 2, Colv = TRUE, margins = c(10,10))
+
+heatmap.2(as.matrix(t(Prop.TCGA.SC.Model.Subset)),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1, key = FALSE,
+          ColSideColors = TCGA.table.colors, labCol = FALSE, cexRow = 2, Colv = TRUE, margins = c(10,10))
+
+#Boxplot to determine enrichment 
+Prop.TCGA.SC.Model.Subset.Box = Prop.TCGA.SC.Model.Subset
+Prop.TCGA.SC.Model.Subset.Box$Type = TCGA.Metadata.subtypes.subset
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "Control", replacement = "1_Control", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "Normal", replacement = "2_Normal-like", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "Basal", replacement = "3_Basal", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "LumA", replacement = "4_LumA", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "LumB", replacement = "5_LumB", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box$Type = gsub(pattern = "Her2", replacement = "6_Her2", x = Prop.TCGA.SC.Model.Subset.Box$Type)
+Prop.TCGA.SC.Model.Subset.Box.Melt = melt(Prop.TCGA.SC.Model.Subset.Box)
+
+ggplot(data = Prop.TCGA.SC.Model.Subset.Box.Melt, aes(x = Type, y = value)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  geom_boxplot(aes(fill = variable), outlier.shape = NA)  + scale_colour_manual(values = "black") 
+
+```
+
+```{r assign cell types - Cell lines}
+
+#profile 1 is epithelial basal 
+#profile 2 is T-cell 
+#profile 3 is adipoctye 
+#profile 4 is epithelial other
+#profile 5 is macrophage 
+#profile 6 is CAF
+#profile 7 is epithelial HER2 
+#profile 8 is epithelial  control
+#profile 9 is epithelial Luminal 
+
+sc.names = c("Epithelial.Basal","T-Cell","Adipocyte","Epithelial.Other","Macrophage", "CAF","Epithelial.Her2","Epithelial.Control","Epithelial.Luminal")
+
+
+colnames(Prop.TCGA.SC.Model.Subset) = sc.names
+colnames(Corr.TCGA.SC.Model) = sc.names
+colnames(XDec.TCGA.SC.Model.norm.gene.chosenProbes) = sc.names
+colnames(Prop.TCGA.SC.Model) = sc.names
+```
+
+###Single Cell Deconvolution Compare Proportions -----
+
+```{r XDec vs EDec single cell}
+interTCGA.SC.samples = intersect(colnames(TCGA.Beta.Trans), rownames(Prop.TCGA.SC.Model))
+EDec.Proportions.SC = EDec.Proportions[interTCGA.SC.samples,]
+EDec.Proportions.SC = na.omit(EDec.Proportions.SC)
+
+Prop.TCGA.SC.Model.EDec = Prop.TCGA.SC.Model[interTCGA.SC.samples,]
+Prop.TCGA.SC.Model.EDec$Samples = rownames(Prop.TCGA.SC.Model.EDec)
+Prop.TCGA.SC.Model.EDec.All = merge(Prop.TCGA.SC.Model.EDec, EDec.Proportions, by = "Samples")
+
+EDec.XDec.Epi = Prop.TCGA.SC.Model.EDec.All$EDec_Epithelial + Prop.TCGA.SC.Model.EDec.All$EDec_Cancer
+
+XDec.Epi = Prop.TCGA.SC.Model.EDec.All$Epithelial.Basal + Prop.TCGA.SC.Model.EDec.All$Epithelial.Other + Prop.TCGA.SC.Model.EDec.All$Epithelial.Her2 + Prop.TCGA.SC.Model.EDec.All$Epithelial.Control + Prop.TCGA.SC.Model.EDec.All$Epithelial.Luminal
+
+
+EDec.XDec.Immune = Prop.TCGA.SC.Model.EDec.All$EDec_Immune
+
+XDec.Immune = Prop.TCGA.SC.Model.EDec.All$`T-Cell` + Prop.TCGA.SC.Model.EDec.All$Macrophage
+
+EDec.XDec.Stroma = Prop.TCGA.SC.Model.EDec.All$EDec_Stromal
+
+XDec.Stroma = Prop.TCGA.SC.Model.EDec.All$Adipocyte + Prop.TCGA.SC.Model.EDec.All$CAF
+
+EDec.XDec.Epi.lm = lm(XDec.Epi ~ -1 + EDec.XDec.Epi)
+summary(EDec.XDec.Epi.lm)
+EDec.XDec.Immune.lm = lm(XDec.Immune ~ -1 + EDec.XDec.Immune)
+summary(EDec.XDec.Immune.lm)
+EDec.XDec.Stroma.lm = lm(XDec.Stroma ~ -1 + EDec.XDec.Stroma)
+summary(EDec.XDec.Stroma.lm)
+```
+
+```{r plot correlation EDec/XDec single cell }
+plot(EDec.XDec.Stroma,XDec.Stroma, xlim = c(0,1), ylim = c(0,1), xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.EDec.Stroma.lm, col = "green")
+points(EDec.XDec.Immune,XDec.Immune, xlim = c(0,1), ylim = c(0,1), main = "Immune", xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.EDec.Immune.lm, col = "blue")
+points(EDec.XDec.Epi,XDec.Epi, xlim = c(0,1), ylim = c(0,1), main = "Epithelial", xlab = "EDec proportions (%)", ylab = "XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.EDec.Epi.lm, col = "black")
+```
+
+```{r compare to other deconvolution methods}
+###FIGURE 2######
+
+
+InfiniumPropsTable = read.table("BRCA_Infitium.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+
+TimerPropsTable = read.table("immuneEstimation_Timer.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+TimerPropsTable$Sum = rowSums(TimerPropsTable)
+TimerPropsTable$Samples = rownames(TimerPropsTable)
+
+
+other_tools = read.csv("TIMER_estimation_for_tcga.csv")
+
+#Xcell
+xcell = other_tools[,c("cell_type","immune.score_XCELL","stroma.score_XCELL")]
+
+xcell_ep = read.csv("xCell_TCGA_RSEM_all.csv")
+xcell_ep = xcell_ep[xcell_ep$X %in% "Epithelial cells",,drop = FALSE]
+xcell_ep = data.frame(t(xcell_ep))
+colnames(xcell_ep) = xcell_ep[1,]
+xcell_ep = xcell_ep[-1,,drop = FALSE]
+xcell_ep$cell_type = rownames(xcell_ep)
+xcell_ep$cell_type = gsub("\\.","-",xcell_ep$cell_type)
+xcell = merge(xcell,xcell_ep, by = "cell_type")
+colnames(xcell) = c("Samples","xcell_immune","xcell_stroma","xcell_epithelial")
+                    
+
+epic = other_tools[,c("cell_type",colnames(other_tools)[grep("EPIC",colnames(other_tools))])]
+ epic$epic_immune = epic$B.cell_EPIC + epic$T.cell.CD4._EPIC + epic$T.cell.CD8._EPIC + epic$Macrophage_EPIC + epic$NK.cell_EPIC 
+hist(epic$epic_immune)
+epic$epic_stromal = epic$Cancer.associated.fibroblast_EPIC + epic$Endothelial.cell_EPIC
+epic$epic_cancer = epic$uncharacterized.cell_EPIC
+epic = epic[,c("cell_type","epic_immune","epic_stromal","epic_cancer")]
+colnames(epic)[1] = "Samples"
+
+
+kassandra_prop = read.csv("kassandra_BRCA_BG_deconvolution.csv")
+kassandra_prop_all = data.frame(t(kassandra_prop))
+colnames(kassandra_prop_all) = kassandra_prop_all[1,]
+kassandra_prop_all = kassandra_prop_all[-1,]
+kassandra_prop_all_std = grep("std",colnames(kassandra_prop_all))
+kassandra_prop_all = kassandra_prop_all[,-kassandra_prop_all_std]
+kassandra_prop_all = kassandra_prop_all[,1:20]
+
+kassandra_prop = kassandra_prop[37:39,]
+kassandra_prop = data.frame(t(kassandra_prop))
+colnames(kassandra_prop) = kassandra_prop[1,]
+kassandra_prop = kassandra_prop[-1,]
+kassandra_prop$Samples = rownames(kassandra_prop)
+kassandra_prop$Samples  = gsub("\\.","-",kassandra_prop$Samples)
+
+Prop.TCGA.SC.Model.Stage2.general = Prop.TCGA.SC.Model.Stage2
+Prop.TCGA.SC.Model.Stage2.general$Stroma = Prop.TCGA.SC.Model.Stage2.general$Adipocyte + Prop.TCGA.SC.Model.Stage2$CAF
+Prop.TCGA.SC.Model.Stage2.general$Adipocyte = NULL
+Prop.TCGA.SC.Model.Stage2.general$CAF = NULL
+Prop.TCGA.SC.Model.Stage2.general$Samples = rownames(Prop.TCGA.SC.Model.Stage2.general)
+colnames(Prop.TCGA.SC.Model.Stage2.general) = paste("XDec", colnames(Prop.TCGA.SC.Model.Stage2.general),sep = "_")
+colnames(Prop.TCGA.SC.Model.Stage2.general)[4] = "Samples"
+colnames(kassandra_prop) = paste("Kassandra",colnames(kassandra_prop), sep = "_")
+colnames(kassandra_prop)[4] = "Samples"
+kassandra_prop[,1:3] = sapply(kassandra_prop[,1:3], as.numeric)
+
+XDec.kassandra = merge(Prop.TCGA.SC.Model.Stage2.general,kassandra_prop,by = "Samples", all.x = TRUE)
+XDec.epic = merge(Prop.TCGA.SC.Model.Stage2.general,epic, by = "Samples")
+XDec.xcell = merge(Prop.TCGA.SC.Model.Stage2.general,xcell, by = "Samples")
+XDec.xcell$xcell_epithelial = as.numeric(XDec.xcell$xcell_epithelial)
+
+CibersortPropsTable = read.table("SC_CibersortX.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+
+XDec.Inf = merge(Prop.TCGA.SC.Model.EDec.All, InfiniumPropsTable, by = "Samples", all.x = TRUE)
+XDec.TIMER = merge(Prop.TCGA.SC.Model.EDec.All, TimerPropsTable, by = "Samples", all.x = TRUE)
+XDec.TIMER = na.omit(XDec.TIMER)
+XDec.Cibersort = merge(Prop.TCGA.SC.Model.EDec.All, CibersortPropsTable, by = "Samples", all.x = TRUE)
+
+
+Infinium.Props = XDec.Inf$Purity_InfiniumPurify
+XDec.Purity = XDec.Inf$Epithelial.Basal + XDec.Inf$Epithelial.Other + XDec.Inf$Epithelial.Her2 + XDec.Inf$Epithelial.Control + XDec.Inf$Epithelial.Luminal
+
+XDec.Purity.lm = lm(XDec.Purity ~ -1 + Infinium.Props)
+summary(XDec.Purity.lm)
+
+Timer.Props = XDec.TIMER$Sum
+XDec.Immune.Timer = XDec.TIMER$`T-Cell` + XDec.TIMER$Macrophage.x
+
+
+XDec.Timer.lm = lm(XDec.Immune.Timer ~ -1 + Timer.Props)
+summary(XDec.Timer.lm)
+
+CIBERSORT.Stroma = XDec.Cibersort$stroma + XDec.Cibersort$endothelial
+XDec.Stroma = XDec.Cibersort$Adipocyte + XDec.Cibersort$CAF
+CIBERSORT.Immune = XDec.Cibersort$Tcell + XDec.Cibersort$Bcell + XDec.Cibersort$macrophage
+XDec.Immune = XDec.Cibersort$`T-Cell` + XDec.Cibersort$Macrophage
+CIBERSORT.Epi = XDec.Cibersort$epithelial
+XDec.Epi = XDec.Cibersort$Epithelial.Basal + XDec.Cibersort$Epithelial.Other + XDec.Cibersort$Epithelial.Her2 + XDec.Cibersort$Epithelial.Control + XDec.Cibersort$Epithelial.Luminal
+
+XDec.CIBERSORT.Stroma.lm = lm(XDec.Stroma ~ -1 + CIBERSORT.Stroma)
+XDec.CIBERSORT.Immune.lm = lm(XDec.Immune ~ -1 + CIBERSORT.Immune)
+XDec.CIBERSORT.Epi.lm = lm(XDec.Epi ~ -1 + CIBERSORT.Epi)
+
+summary(XDec.CIBERSORT.Stroma.lm)
+summary(XDec.CIBERSORT.Immune.lm)
+summary(XDec.CIBERSORT.Epi.lm)
+
+
+#kassandra
+XDec.kassandra.Stroma.lm = lm(XDec.kassandra$XDec_Stroma ~ -1 + XDec.kassandra$`Kassandra_Stromal_sum `)
+XDec.kassandra.Immune.lm = lm(XDec.kassandra$XDec_Immune ~ -1 + XDec.kassandra$`Kassandra_Immune_sum `)
+XDec.kassandra.Epi.lm = lm(XDec.kassandra$XDec_Epithelial ~ -1 + XDec.kassandra$`Kassandra_Cancer_sum `)
+
+summary(XDec.kassandra.Stroma.lm)
+summary(XDec.kassandra.Immune.lm)
+summary(XDec.kassandra.Epi.lm)
+
+XDec.epic.Stroma.lm = lm(XDec.epic$XDec_Stroma ~ -1 + XDec.epic$epic_stromal)
+XDec.epic.Immune.lm = lm(XDec.epic$XDec_Immune ~ -1 + XDec.epic$epic_immune)
+XDec.epic.Epi.lm = lm(XDec.epic$XDec_Epithelial ~ -1 + XDec.epic$epic_cancer)
+
+summary(XDec.epic.Stroma.lm)
+summary(XDec.epic.Immune.lm)
+summary(XDec.epic.Epi.lm)
+
+
+XDec.xcell.Stroma.lm = lm(XDec.xcell$XDec_Stroma ~ -1 + XDec.xcell$xcell_stroma)
+XDec.xcell.Immune.lm = lm(XDec.xcell$XDec_Immune ~ -1 + XDec.xcell$xcell_immune)
+XDec.xcell.Epi.lm = lm(XDec.xcell$XDec_Epithelial ~ -1 + XDec.xcell$xcell_epithelial)
+
+summary(XDec.xcell.Stroma.lm)
+summary(XDec.xcell.Immune.lm)
+summary(XDec.xcell.Epi.lm)
+
+#Summary figure correlation 
+
+Prop.TCGA.SC.Model.Stage2.general
+
+
+
+CibersortPropsTable_general = CibersortPropsTable[,c(1,11,12,13)]
+
+all_methods_general  = merge(CibersortPropsTable_general,Prop.TCGA.SC.Model.Stage2.general, by = "Samples")
+all_methods_general  = merge(all_methods_general,kassandra_prop, by = "Samples")
+all_methods_general  = merge(all_methods_general,xcell, by = "Samples")
+all_methods_general  = merge(all_methods_general,epic, by = "Samples")
+
+all_methods_general_ep = all_methods_general[,c(1,4,5,10,13,16)]
+all_methods_general_stromal = all_methods_general[,c(1,2,7,9,12,15)]
+all_methods_general_immune = all_methods_general[,c(1,3,6,8,11,14)]
+
+rownames(all_methods_general_ep) = all_methods_general_ep$Samples
+all_methods_general_ep$Samples = NULL
+rownames(all_methods_general_stromal) = all_methods_general_stromal$Samples
+all_methods_general_stromal$Samples = NULL
+rownames(all_methods_general_immune) = all_methods_general_immune$Samples
+all_methods_general_immune$Samples = NULL
+
+
+all_methods_general_ep = data.frame(lapply(all_methods_general_ep,as.numeric))
+all_methods_general_stromal = data.frame(lapply(all_methods_general_stromal,as.numeric))
+all_methods_general_immune = data.frame(lapply(all_methods_general_immune,as.numeric))
+
+
+
+ep_cor = cor(all_methods_general_ep)
+immune_cor = cor(all_methods_general_immune)
+stroma_cor = cor(all_methods_general_stromal)
+
+pdf("ep_cor.pdf")
+corrplot(ep_cor,method = 'number',order = "alphabet")
+dev.off()
+
+
+pdf("ep_cor_circle.pdf")
+corrplot(ep_cor,order = "alphabet")
+dev.off()
+
+
+
+pdf("immune_cor.pdf")
+corrplot(immune_cor,method = 'number',order = "alphabet")
+dev.off()
+
+
+pdf("immune_cor_circle.pdf")
+corrplot(immune_cor,order = "alphabet")
+dev.off()
+
+
+
+pdf("stroma_cor.pdf")
+corrplot(stroma_cor,method = 'number',order = "alphabet")
+dev.off()
+
+
+pdf("stroma_cor_circle.pdf")
+corrplot(stroma_cor,order = "alphabet")
+dev.off()
+
+
+diag(ep_cor) = NA
+diag(immune_cor) = NA
+diag(stroma_cor) = NA
+
+sum = colSums(ep_cor)
+colMeans(ep_cor,na.rm = TRUE)
+colMeans(immune_cor,na.rm = TRUE)
+colMeans(stroma_cor,na.rm = TRUE)
+
+
+mean_ep_cor = ep_cor
+mean_ep_cor$mean = colMeans(mean_ep_cor)
+```
+
+
+```{r plot XDec vs other methods - single cell}
+
+####FIGURE 2#####
+
+plot(Infinium.Props,XDec.Purity, xlim = c(0,1), ylim = c(0,1), main = "Infinium", xlab = "Infinium proportions (%)", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.Purity.lm)
+
+plot(Timer.Props,XDec.Immune.Timer, ylim = c(0,1), main = "TIMER", xlab = "TIMER proportions (%)", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.Timer.lm)
+
+plot(Timer.Props,XDec.Immune.Timer, ylim = c(0,1), main = "TIMER", xlab = "TIMER proportions (%)", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.Timer.lm)
+
+pdf("xdec_kassandra.pdf")
+plot(XDec.kassandra$`Kassandra_Stromal_sum `,XDec.kassandra$XDec_Stroma, xlim = c(0,1), ylim = c(0,1), main = "kassandra", xlab = "kassandra", ylab = "SingleCell XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.kassandra.Stroma.lm, col = "green")
+points(XDec.kassandra$`Kassandra_Immune_sum `,XDec.kassandra$XDec_Immune,xlim = c(0,1), ylim = c(0,1), main = "kassandra", xlab = "kassandraX", ylab = "SingleCell XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.kassandra.Immune.lm,col = "blue")
+points(XDec.kassandra$`Kassandra_Cancer_sum `,XDec.kassandra$XDec_Epithelial,xlim = c(0,1), ylim = c(0,1), main = "kassandra", xlab = "kassandraX", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.kassandra.Epi.lm,col = "black")
+dev.off()
+
+pdf("xdec_epic.pdf")
+plot(XDec.epic$epic_stromal,XDec.epic$XDec_Stroma, xlim = c(0,1), ylim = c(0,1), main = "epic", xlab = "epic", ylab = "SingleCell XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.epic.Stroma.lm, col = "green")
+points(XDec.epic$epic_immune ,XDec.epic$XDec_Immune,xlim = c(0,1), ylim = c(0,1), main = "epic", xlab = "epicX", ylab = "SingleCell XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.epic.Immune.lm,col = "blue")
+points(XDec.epic$epic_cancer,XDec.epic$XDec_Epithelial,xlim = c(0,1), ylim = c(0,1), main = "epic", xlab = "epicX", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.epic.Epi.lm,col = "black")
+dev.off()
+
+pdf("xdec_xcell.pdf")
+plot(XDec.xcell$xcell_stroma,XDec.xcell$XDec_Stroma, xlim = c(0,1), ylim = c(0,1), main = "xcell", xlab = "xcell", ylab = "SingleCell XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.xcell.Stroma.lm, col = "green")
+points(XDec.xcell$xcell_immune ,XDec.xcell$XDec_Immune,xlim = c(0,1), ylim = c(0,1), main = "xcell", xlab = "xcellX", ylab = "SingleCell XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.xcell.Immune.lm,col = "blue")
+points(XDec.xcell$xcell_epithelial,XDec.xcell$XDec_Epithelial,xlim = c(0,1), ylim = c(0,1), main = "xcell", xlab = "xcellX", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.xcell.Epi.lm,col = "black")
+dev.off()
+
+
+
+###FIGURE 3 ####
+plot(CIBERSORT.Stroma,XDec.Stroma, xlim = c(0,1), ylim = c(0,1), main = "Cibersort", xlab = "CibersortX", ylab = "SingleCell XDec proportions (%)", col = "green", pch = 20)
+abline(XDec.CIBERSORT.Stroma.lm, col = "green")
+points(CIBERSORT.Immune,XDec.Immune,xlim = c(0,1), ylim = c(0,1), main = "Cibersort", xlab = "CibersortX", ylab = "SingleCell XDec proportions (%)", col = "blue", pch = 20)
+abline(XDec.CIBERSORT.Immune.lm,col = "blue")
+points(CIBERSORT.Epi,XDec.Epi,xlim = c(0,1), ylim = c(0,1), main = "Cibersort", xlab = "CibersortX", ylab = "SingleCell XDec proportions (%)", col = "black", pch = 20)
+abline(XDec.CIBERSORT.Immune.lm,col = "black")
+
+
+
+
+
+
+```
+
+```{r cibersortx vs other methods}
+
+
+CibersortPropsTable.Timer = merge(CibersortPropsTable, TimerPropsTable, by = "Samples")
+CibersortPropsTable.Inf = merge(CibersortPropsTable, InfiniumPropsTable, by = "Samples")
+CibersortPropsTable.EDec = merge(CibersortPropsTable, EDec.Proportions, by = "Samples")
+
+Timer.Cx.Props = CibersortPropsTable.Timer$B_cell + CibersortPropsTable.Timer$CD4_Tcell + CibersortPropsTable.Timer$CD8_Tcell + CibersortPropsTable.Timer$Neutrophil + CibersortPropsTable.Timer$Macrophage + CibersortPropsTable.Timer$Dendritic
+Cx.Immune = CibersortPropsTable.Timer$Tcell + CibersortPropsTable.Timer$Bcell + CibersortPropsTable.Timer$macrophage
+Cx.Timer.lm = lm(Cx.Immune ~ -1 + Timer.Cx.Props)
+summary(Cx.Timer.lm)
+
+Infinium.Cx.Props = CibersortPropsTable.Inf$Purity_InfiniumPurify
+Cx.Purity = CibersortPropsTable.Inf$epithelial
+Cx.Infinium.lm = lm(Cx.Purity ~ -1 + Infinium.Cx.Props)
+summary(Cx.Infinium.lm)
+
+EDec.Cx.Epi = CibersortPropsTable.EDec$EDec_Cancer + CibersortPropsTable.EDec$EDec_Epithelial
+Cx.Epi = CibersortPropsTable.EDec$epithelial
+EDec.Cx.Immune = CibersortPropsTable.EDec$EDec_Immune
+Cx.Immune = CibersortPropsTable.EDec$Tcell + CibersortPropsTable.EDec$Bcell + CibersortPropsTable.EDec$macrophage
+EDec.Cx.Stroma = CibersortPropsTable.EDec$EDec_Stromal
+Cx.Stroma = CibersortPropsTable.EDec$stroma + CibersortPropsTable.EDec$endothelial
+
+EDec.Cx.Epi.lm = lm(Cx.Epi ~ -1 + EDec.Cx.Epi)
+summary(EDec.Cx.Epi.lm)
+EDec.Cx.Immune.lm = lm(Cx.Immune ~ -1 + EDec.Cx.Immune)
+summary(EDec.Cx.Immune.lm)
+EDec.Cx.Stroma.lm = lm(Cx.Stroma ~ -1 + EDec.Cx.Stroma)
+summary(EDec.Cx.Stroma.lm)
+```
+
+```{r plot cibersort vs other methods}
+
+
+###FIGURE 3####
+
+plot(CibersortPropsTable.Inf$Purity_InfiniumPurify,
+     CibersortPropsTable.Inf$epithelial,
+     main = "InfiniumPurify v. CIBERSORTx", xlim = c(0,1), ylim = c(0,1), xlab = "Purity_InfiniumPurify", ylab = "CIBERSORTx proportions (%)", col = "black", pch = 20)
+abline(Cx.Infinium.lm)
+
+
+plot(CibersortPropsTable.Timer$B_cell + CibersortPropsTable.Timer$CD4_Tcell + CibersortPropsTable.Timer$CD8_Tcell + CibersortPropsTable.Timer$Neutrophil + CibersortPropsTable.Timer$Macrophage + CibersortPropsTable.Timer$Dendritic,
+     CibersortPropsTable.Timer$Tcell + CibersortPropsTable.Timer$Bcell + CibersortPropsTable.Timer$macrophage,
+     ylim = c(0,1), main = "TIMER v. CIBERSORTx", xlab = "TIMER", ylab = "CIBERSORTx proportions (%)", col = "blue", pch = 20)
+abline(Cx.Timer.lm)
+
+plot(CibersortPropsTable.EDec$EDec_Cancer + CibersortPropsTable.EDec$EDec_Epithelial, CibersortPropsTable.EDec$epithelial,
+     xlim = c(0,1), ylim = c(0,1), main = "EDec v. CIBERSORTx", xlab = "EDec proportions (%)", ylab = "CIBERSORTx proportions (%)", col = "black", pch = 20)
+abline(EDec.Cx.Epi.lm, col = "black")
+points(CibersortPropsTable.EDec$EDec_Immune, CibersortPropsTable.EDec$Tcell + CibersortPropsTable.EDec$Bcell + CibersortPropsTable.EDec$macrophage, col = "blue", pch = 20)
+abline(EDec.Cx.Immune.lm, col = "blue")
+points(CibersortPropsTable.EDec$EDec_Stromal, CibersortPropsTable.EDec$stroma + CibersortPropsTable.EDec$endothelial, col = "green", pch = 20)
+abline(EDec.Cx.Stroma.lm, col = "green")
+```
+
+```{r correlate normalized epithelial props and TME}
+Prop.TCGA.SC.Model.norm = Prop.TCGA.SC.Model
+
+cor(Prop.TCGA.SC.Model$CAF,Prop.TCGA.SC.Model$Epithelial.Her2)
+cor(Prop.TCGA.SC.Model$Adipocyte,Prop.TCGA.SC.Model$Epithelial.Her2)
+
+cor(Prop.TCGA.SC.Model$CAF,Prop.TCGA.SC.Model$Epithelial.Luminal)
+cor(Prop.TCGA.SC.Model$Adipocyte,Prop.TCGA.SC.Model$Epithelial.Luminal)
+
+
+```
+
+
+
+###Single Cell Deconvolution Gene Expression Stage 2 and Compare Class ----
+
+```{r Stage 2 single cell separate stroma PAM50}
+TCGA.Reads = read.table("HiSeqV2_TCGA.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = 1)
+TCGA.Reads = (2^TCGA.Reads)-1
+TCGA.Reads = TCGA.Reads[rowSums(TCGA.Reads) > 0,]
+
+
+#Sum the epithelial and immune profile
+Prop.TCGA.SC.Model.Stage2 = Prop.TCGA.SC.Model
+Prop.TCGA.SC.Model.Stage2$Epithelial = Prop.TCGA.SC.Model.Stage2$Epithelial.Basal + Prop.TCGA.SC.Model.Stage2$Epithelial.Other + Prop.TCGA.SC.Model.Stage2$Epithelial.Her2 + Prop.TCGA.SC.Model.Stage2$Epithelial.Control + Prop.TCGA.SC.Model.Stage2$Epithelial.Luminal
+
+Prop.TCGA.SC.Model.Stage2$Immune = Prop.TCGA.SC.Model.Stage2$`T-Cell` + Prop.TCGA.SC.Model.Stage2$Macrophage
+
+Prop.TCGA.SC.Model.Stage2 = Prop.TCGA.SC.Model.Stage2[,c(3,6,10,11)]
+
+#Control
+TCGA.Reads.Control = as.matrix(TCGA.Reads[,TCGA.Control.samples])
+Prop.TCGA.SC.Model.Control = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.Control.samples,])
+Stage2.SC.Model.Control = EDec::run_edec_stage_2(TCGA.Reads.Control, Prop.TCGA.SC.Model.Control)
+Stage2.SC.Model.Control.means = as.data.frame(Stage2.SC.Model.Control$means) 
+Stage2.SC.Model.Control.std = as.data.frame(Stage2.SC.Model.Control$std.errors)
+
+Stage2.SC.Model.Control.means = as.data.frame(Stage2.SC.Model.Control.means)
+colnames(Stage2.SC.Model.Control.means) = paste(colnames(Stage2.SC.Model.Control.means),"Control", sep = "_")
+Stage2.SC.Model.Control.means$Genes = rownames(Stage2.SC.Model.Control.means)
+
+Stage2.SC.Model.Control.std = as.data.frame(Stage2.SC.Model.Control.std)
+colnames(Stage2.SC.Model.Control.std) = paste(colnames(Stage2.SC.Model.Control.std),"Control", sep = "_")
+Stage2.SC.Model.Control.std$Genes = rownames(Stage2.SC.Model.Control.std)
+
+#Normal
+TCGA.Reads.Normal = as.matrix(TCGA.Reads[,TCGA.Normal.samples])
+Prop.TCGA.SC.Model.Normal = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.Normal.samples,])
+Stage2.SC.Model.Normal = EDec::run_edec_stage_2(TCGA.Reads.Normal, Prop.TCGA.SC.Model.Normal)
+Stage2.SC.Model.Normal.means = as.data.frame(Stage2.SC.Model.Normal$means) 
+Stage2.SC.Model.Normal.std = as.data.frame(Stage2.SC.Model.Normal$std.errors)
+
+Stage2.SC.Model.Normal.means = as.data.frame(Stage2.SC.Model.Normal.means)
+colnames(Stage2.SC.Model.Normal.means) = paste(colnames(Stage2.SC.Model.Normal.means),"Normal", sep = "_")
+Stage2.SC.Model.Normal.means$Genes = rownames(Stage2.SC.Model.Normal.means)
+
+Stage2.SC.Model.Normal.std = as.data.frame(Stage2.SC.Model.Normal.std)
+colnames(Stage2.SC.Model.Normal.std) = paste(colnames(Stage2.SC.Model.Normal.std),"Normal", sep = "_")
+Stage2.SC.Model.Normal.std$Genes = rownames(Stage2.SC.Model.Normal.std)
+
+#Basal
+TCGA.Reads.Basal = as.matrix(TCGA.Reads[,TCGA.Basal.samples])
+Prop.TCGA.SC.Model.Basal = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.Basal.samples,])
+Stage2.SC.Model.Basal = EDec::run_edec_stage_2(TCGA.Reads.Basal, Prop.TCGA.SC.Model.Basal)
+Stage2.SC.Model.Basal.means = as.data.frame(Stage2.SC.Model.Basal$means) 
+Stage2.SC.Model.Basal.std = as.data.frame(Stage2.SC.Model.Basal$std.errors)
+
+Stage2.SC.Model.Basal.means = as.data.frame(Stage2.SC.Model.Basal.means)
+colnames(Stage2.SC.Model.Basal.means) = paste(colnames(Stage2.SC.Model.Basal.means),"Basal", sep = "_")
+Stage2.SC.Model.Basal.means$Genes = rownames(Stage2.SC.Model.Basal.means)
+
+Stage2.SC.Model.Basal.std = as.data.frame(Stage2.SC.Model.Basal.std)
+colnames(Stage2.SC.Model.Basal.std) = paste(colnames(Stage2.SC.Model.Basal.std),"Basal", sep = "_")
+Stage2.SC.Model.Basal.std$Genes = rownames(Stage2.SC.Model.Basal.std)
+
+#Luminal A
+TCGA.LumA.samples.No11 = TCGA.LumA.samples
+
+TCGA.Reads.LumA = as.matrix(TCGA.Reads[,TCGA.LumA.samples.No11])
+Prop.TCGA.SC.Model.LumA = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.LumA.samples.No11,])
+Stage2.SC.Model.LumA = EDec::run_edec_stage_2(TCGA.Reads.LumA, Prop.TCGA.SC.Model.LumA)
+Stage2.SC.Model.LumA.means = as.data.frame(Stage2.SC.Model.LumA$means) 
+Stage2.SC.Model.LumA.std = as.data.frame(Stage2.SC.Model.LumA$std.errors)
+
+Stage2.SC.Model.LumA.means = as.data.frame(Stage2.SC.Model.LumA.means)
+colnames(Stage2.SC.Model.LumA.means) = paste(colnames(Stage2.SC.Model.LumA.means),"LuminalA", sep = "_")
+Stage2.SC.Model.LumA.means$Genes = rownames(Stage2.SC.Model.LumA.means)
+
+Stage2.SC.Model.LumA.std = as.data.frame(Stage2.SC.Model.LumA.std)
+colnames(Stage2.SC.Model.LumA.std) = paste(colnames(Stage2.SC.Model.LumA.std),"LuminalA", sep = "_")
+Stage2.SC.Model.LumA.std$Genes = rownames(Stage2.SC.Model.LumA.std)
+
+#Luminal B
+TCGA.Reads.LumB = as.matrix(TCGA.Reads[,TCGA.LumB.samples])
+Prop.TCGA.SC.Model.LumB = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.LumB.samples,])
+Stage2.SC.Model.LumB = EDec::run_edec_stage_2(TCGA.Reads.LumB, Prop.TCGA.SC.Model.LumB)
+Stage2.SC.Model.LumB.means = as.data.frame(Stage2.SC.Model.LumB$means) 
+Stage2.SC.Model.LumB.std = as.data.frame(Stage2.SC.Model.LumB$std.errors)
+
+Stage2.SC.Model.LumB.means = as.data.frame(Stage2.SC.Model.LumB.means)
+colnames(Stage2.SC.Model.LumB.means) = paste(colnames(Stage2.SC.Model.LumB.means),"LuminalB", sep = "_")
+Stage2.SC.Model.LumB.means$Genes = rownames(Stage2.SC.Model.LumB.means)
+
+Stage2.SC.Model.LumB.std = as.data.frame(Stage2.SC.Model.LumB.std)
+colnames(Stage2.SC.Model.LumB.std) = paste(colnames(Stage2.SC.Model.LumB.std),"LuminalB", sep = "_")
+Stage2.SC.Model.LumB.std$Genes = rownames(Stage2.SC.Model.LumB.std)
+
+#Her2
+TCGA.Reads.Her2 = as.matrix(TCGA.Reads[,TCGA.Her2.samples])
+Prop.TCGA.SC.Model.Her2 = as.matrix(Prop.TCGA.SC.Model.Stage2[TCGA.Her2.samples,])
+Stage2.SC.Model.Her2 = EDec::run_edec_stage_2(TCGA.Reads.Her2, Prop.TCGA.SC.Model.Her2)
+Stage2.SC.Model.Her2.means = as.data.frame(Stage2.SC.Model.Her2$means) 
+Stage2.SC.Model.Her2.std = as.data.frame(Stage2.SC.Model.Her2$std.errors)
+
+Stage2.SC.Model.Her2.means = as.data.frame(Stage2.SC.Model.Her2.means)
+colnames(Stage2.SC.Model.Her2.means) = paste(colnames(Stage2.SC.Model.Her2.means),"Her2", sep = "_")
+Stage2.SC.Model.Her2.means$Genes = rownames(Stage2.SC.Model.Her2.means)
+
+Stage2.SC.Model.Her2.std = as.data.frame(Stage2.SC.Model.Her2.std)
+colnames(Stage2.SC.Model.Her2.std) = paste(colnames(Stage2.SC.Model.Her2.std),"Her2", sep = "_")
+Stage2.SC.Model.Her2.std$Genes = rownames(Stage2.SC.Model.Her2.std)
+
+## Combine
+Stage2.SC.Model.Means = list(Stage2.SC.Model.LumA.means, Stage2.SC.Model.LumB.means, Stage2.SC.Model.Her2.means, Stage2.SC.Model.Basal.means, Stage2.SC.Model.Normal.means, Stage2.SC.Model.Control.means) %>% 
+  Reduce(function(dtf1,dtf2) full_join(dtf1,dtf2,by="Genes"), .)
+rownames(Stage2.SC.Model.Means) = Stage2.SC.Model.Means$Genes
+
+Stage2.SC.Model.std = list(Stage2.SC.Model.LumA.std, Stage2.SC.Model.LumB.std, Stage2.SC.Model.Her2.std, Stage2.SC.Model.Basal.std, Stage2.SC.Model.Normal.std, Stage2.SC.Model.Control.std) %>%
+  Reduce(function(dtf1,dtf2) full_join(dtf1,dtf2,by="Genes"), .)
+rownames(Stage2.SC.Model.std) = Stage2.SC.Model.std$Genes
+
+epithelial_genes = c("ESR1","KRT18","ERBB2","FOXA1")
+adipocyte = c("PPARG","CEBPA", "ADIPOQ", "FABP4")
+caf = c("ACTA2", "FN1", "FAP", "COL1A1")
+immune_genes = c("PTPRC","CD3G","CD8A","CD4")
+
+all_genes_cell_type = c(epithelial_genes, adipocyte, caf, immune_genes)
+
+
+plot_list_all_genes = list()
+for(gene in all_genes_cell_type){
+  x_mean = melt(Stage2.SC.Model.Means[gene,])
+  x_std = melt(Stage2.SC.Model.std[gene,])
+  colnames(x_mean)[3] = "counts"
+  colnames(x_std)[3] = "std.error"
+  x_mean_std = merge(x_mean,x_std,by = c("Genes","variable"))
+  x_mean_std <- x_mean_std %>% separate(variable, c("cell_type", "subtype"), "_")
+  plot_name_file = paste(gene,"Boxplot.ExDec.png")
+  plot = ggplot(x_mean_std,aes(x = cell_type , y = counts, fill = subtype)) + geom_bar(stat="identity", position = "dodge") + 
+    geom_errorbar(aes(ymax = counts + std.error, ymin = ifelse(counts - std.error < 0, 0, counts - std.error)), position = position_dodge(0.95), width = 0.25) +
+    scale_fill_brewer(palette = "Set1") + ggtitle(gene) 
+  plot_list_all_genes[[gene]] = plot
+}
+
+
+png("Stage2_stromal.png",4000,1000)
+multiplot(plot_list_all_genes[[1]], plot_list_all_genes[[2]], plot_list_all_genes[[3]], plot_list_all_genes[[4]], plot_list_all_genes[[5]],
+          plot_list_all_genes[[6]], plot_list_all_genes[[7]], plot_list_all_genes[[8]], plot_list_all_genes[[9]],plot_list_all_genes[[10]],
+          plot_list_all_genes[[11]],plot_list_all_genes[[12]],plot_list_all_genes[[13]],plot_list_all_genes[[14]],plot_list_all_genes[[15]],
+          plot_list_all_genes[[16]], cols = 4)
+dev.off()
+
+
+pdf("Stage2_stromal.pdf")
+multiplot(plot_list_all_genes[[1]], plot_list_all_genes[[2]], plot_list_all_genes[[3]], plot_list_all_genes[[4]], plot_list_all_genes[[5]],
+          plot_list_all_genes[[6]], plot_list_all_genes[[7]], plot_list_all_genes[[8]], plot_list_all_genes[[9]],plot_list_all_genes[[10]],
+          plot_list_all_genes[[11]],plot_list_all_genes[[12]],plot_list_all_genes[[13]],plot_list_all_genes[[14]],plot_list_all_genes[[15]],
+          plot_list_all_genes[[16]], cols = 4)
+dev.off()
+
+for (i in 1:length(plot_list_all_genes)) {
+    file_name = paste("Stage2_", i, ".pdf", sep="")
+    pdf(file_name)
+    print(plot_list_all_genes[[i]])
+    dev.off()
+}
+
+
+#Association of CAFs and Adpiocytes with OXPHOS 
+oxphos.Genes = read.table("oxphos.txt")
+oxphos.Genes = oxphos.Genes$V1
+oxphos.Genes = as.character(oxphos.Genes)
+
+Stage2.SC.Model.Means.oxphos = Stage2.SC.Model.Means[rownames(Stage2.SC.Model.Means) %in% oxphos.Genes,]
+oxphos.Epithelial = Stage2.SC.Model.Means.oxphos[,grep("Epithelial",colnames(Stage2.SC.Model.Means.oxphos))]
+oxphos.Epithelial = t(oxphos.Epithelial)
+
+adipocyte.adi = Stage2.SC.Model.Means[rownames(Stage2.SC.Model.Means) %in% adipocyte,]
+adipocyte.adi = adipocyte.adi[,grep("Adipocyte",colnames(adipocyte.adi))]
+adipocyte.adi = t(adipocyte.adi)
+
+caf.caf = Stage2.SC.Model.Means[caf,]
+caf.caf = caf.caf[,grep("CAF",colnames(caf.caf))]
+caf.caf = t(caf.caf)
+
+Cor.oxphos.Epithelial.adipocyte =  cor(oxphos.Epithelial, adipocyte.adi)
+Cor.oxphos.Epithelial.CAF =  cor(oxphos.Epithelial, caf.caf)
+
+###FIGURE 4####
+hist(Cor.oxphos.Epithelial.adipocyte, breaks = 20, col = rgb(0,0,1,1/4), xlim = c(-1,1))
+hist(Cor.oxphos.Epithelial.CAF, breaks = 20, col = rgb(1,0,0,1/4), xlim = c(-1,1), add = T)
+```
+
+```{r XDec subtype classification}
+Prop.TCGA.SC.Model.Stage2.Class = Prop.TCGA.SC.Model
+Prop.TCGA.SC.Model.Stage2.Class = Prop.TCGA.SC.Model.Stage2.Class[,grep("Epithelial",colnames(Prop.TCGA.SC.Model.Stage2.Class))]
+Prop.TCGA.SC.Model.Stage2.Class$NewClassification = colnames(Prop.TCGA.SC.Model.Stage2.Class)[apply(Prop.TCGA.SC.Model.Stage2.Class[,c(1:5)],1,which.max)]
+Prop.TCGA.SC.Model.Stage2.Class$NewClassification = gsub(pattern = "Epithelial.", replacement = "", x = Prop.TCGA.SC.Model.Stage2.Class$NewClassification)
+Prop.TCGA.SC.Model.Stage2.Class$Sample = rownames(Prop.TCGA.SC.Model.Stage2.Class)
+#Add the PAM50 classifications 
+Prop.TCGA.SC.Model.Stage2.Class = Prop.TCGA.SC.Model.Stage2.Class[TCGA.Metadata.Subset.Samples,]
+Prop.TCGA.SC.Model.Stage2.Class$PAM50Classification = TCGA.Metadata.subtypes.subset
+Prop.TCGA.SC.Model.Stage2.Class$Sample = rownames(Prop.TCGA.SC.Model.Stage2.Class)
+Prop.TCGA.SC.Model.Stage2.Class$HER2 = TCGA.Metadata.Subset$HER2_Final_Status_nature2012
+```
+
+```{r correlate normalized epithelial props and TME}
+Prop.TCGA.SC.norm = Prop.TCGA.SC.Model
+Prop.TCGA.SC.norm = Prop.TCGA.SC.norm[TCGA.Metadata.Subset.Samples,]
+Prop.TCGA.SC.norm$Colsum = Prop.TCGA.SC.norm$Epithelial.Her2 + Prop.TCGA.SC.norm$Epithelial.Basal + Prop.TCGA.SC.norm$Epithelial.Luminal
+Prop.TCGA.SC.norm$Epithelial.Her2 = Prop.TCGA.SC.norm$Epithelial.Her2 * (1/Prop.TCGA.SC.norm$Colsum)
+Prop.TCGA.SC.norm$Epithelial.Basal = Prop.TCGA.SC.norm$Epithelial.Basal * (1/Prop.TCGA.SC.norm$Colsum)
+Prop.TCGA.SC.norm$Epithelial.Luminal = Prop.TCGA.SC.norm$Epithelial.Luminal * (1/Prop.TCGA.SC.norm$Colsum)
+
+#More CAF associated with more HER2
+cor(Prop.TCGA.SC.norm$CAF,Prop.TCGA.SC.norm$Epithelial.Her2)
+
+cor(Prop.TCGA.SC.norm$`T-Cell`,Prop.TCGA.SC.norm$Epithelial.Her2)
+cor(Prop.TCGA.SC.norm$`T-Cell`,Prop.TCGA.SC.norm$Epithelial.Basal)
+cor(Prop.TCGA.SC.norm$`T-Cell`,Prop.TCGA.SC.norm$Epithelial.Luminal)
+
+cor(Prop.TCGA.SC.norm$Macrophage,Prop.TCGA.SC.norm$Epithelial.Her2)
+
+#More macrophage associated with Basal and negatively associated with Luminal
+cor(Prop.TCGA.SC.norm$Macrophage,Prop.TCGA.SC.norm$Epithelial.Basal)
+
+
+Prop.TCGA.SC.norm.mac = Prop.TCGA.SC.norm[Prop.TCGA.SC.norm$Macrophage > 0,]
+Prop.TCGA.SC.norm.mac.basal = Prop.TCGA.SC.norm.mac[Prop.TCGA.SC.norm.mac$Epithelial.Basal > 0,]
+
+plot(Prop.TCGA.SC.norm.mac.basal$Epithelial.Basal,Prop.TCGA.SC.norm.mac.basal$Macrophage)
+
+cor(Prop.TCGA.SC.norm$Macrophage,Prop.TCGA.SC.norm$Epithelial.Luminal)
+cor.test(Prop.TCGA.SC.norm$Macrophage,Prop.TCGA.SC.norm$Epithelial.Luminal)
+cor(Prop.TCGA.SC.ggtern$Adipocyte,Prop.TCGA.SC.ggtern$Epithelial.Her2)
+cor(Prop.TCGA.SC.ggtern$CAF,Prop.TCGA.SC.ggtern$Epithelial.Luminal)
+cor(Prop.TCGA.SC.ggtern$Adipocyte,Prop.TCGA.SC.ggtern$Epithelial.Luminal)
+
+
+```
+
+```{r ERBB2 pathway activation}
+path_score = read.csv("pathway_scores_props.txt")
+#erbb2 = hsa04012
+path_score = path_score[path_score$SAS == "hsa04012",]
+colnames(path_score) = gsub("\\.","-",colnames(path_score))
+colnames(path_score) = gsub("(-01).*","\\1",colnames(path_score))
+colnames(path_score) = gsub("(-11).*","\\1",colnames(path_score))
+
+path_score_all = t(path_score)
+colnames(path_score_all) = path_score_all[1,]
+path_score_all = path_score_all[2:1213,,drop = FALSE]
+path_score_all = data.frame(path_score_all)
+path_score_all$hsa04012 = as.numeric(path_score_all$hsa04012)
+quantile(path_score_all$hsa04012)
+#75% = 153
+path_score_all$Sample = rownames(path_score_all)
+Prop.TCGA.SC.Model.Stage2.Class.path = merge(Prop.TCGA.SC.Model.Stage2.Class,path_score_all, by = "Sample")
+Prop.TCGA.SC.Model.Stage2.Class.path.class = Prop.TCGA.SC.Model.Stage2.Class.path[,7:10]
+Prop.TCGA.SC.Model.Stage2.Class.path.class$high_erbb2[Prop.TCGA.SC.Model.Stage2.Class.path.class$hsa04012 > 153]<- "high"
+
+Prop.TCGA.SC.Model.Stage2.Class.path.class$NewClassification[Prop.TCGA.SC.Model.Stage2.Class.path.class$NewClassification == "Control"] <- "Normal"
+Prop.TCGA.SC.Model.Stage2.Class.path.class$hsa04012 = NULL
+```
+
+```{r compare XDec to PAM50 subtypes - TCGA}
+class_agg =  plyr::count(Prop.TCGA.SC.Model.Stage2.Class.path.class)
+class_agg$Match = ifelse(class_agg$NewClassification == "Luminal" & class_agg$PAM50Classification == "LumA" | class_agg$NewClassification =="Luminal" & class_agg$PAM50Classification == "LumB" | class_agg$NewClassification == "Her2" & class_agg$PAM50Classification == "Her2" | class_agg$NewClassification == "Normal" & class_agg$PAM50Classification == "Normal" |class_agg$NewClassification == "Normal" & class_agg$PAM50Classification == "Control" | class_agg$NewClassification == "Basal" & class_agg$PAM50Classification == "Basal",1,0)
+
+
+class_agg$PAM50Classification = gsub(pattern = "Control", replacement = "6_Control", class_agg$PAM50Classification)
+class_agg$PAM50Classification = gsub(pattern = "Normal", replacement = "5_Normal_like", class_agg$PAM50Classification)
+class_agg$PAM50Classification = gsub(pattern = "Basal", replacement = "4_Basal", class_agg$PAM50Classification)
+class_agg$PAM50Classification = gsub(pattern = "LumA", replacement = "3_LumA", class_agg$PAM50Classification)
+class_agg$PAM50Classification = gsub(pattern = "LumB", replacement = "2_LumB", class_agg$PAM50Classification)
+class_agg$PAM50Classification = gsub(pattern = "Her2", replacement = "1_Her2", class_agg$PAM50Classification)
+
+class_agg$NewClassification = gsub(pattern = "Normal", replacement = "5_Normal", class_agg$NewClassification)
+class_agg$NewClassification = gsub(pattern = "Basal", replacement = "4_Basal", class_agg$NewClassification)
+class_agg$NewClassification = gsub(pattern = "Other", replacement = "3_Other", class_agg$NewClassification)
+class_agg$NewClassification = gsub(pattern = "Luminal", replacement = "2_Luminal", class_agg$NewClassification)
+class_agg$NewClassification = gsub(pattern = "Her2", replacement = "1_Her2", class_agg$NewClassification)
+
+class_agg$color[class_agg$Match == 1]<-"gray"
+class_agg$color[class_agg$Match == 1 & class_agg$HER2 == "Positive"]<-"blue"
+
+class_agg$color[class_agg$Match == 0 ]<-"red"
+class_agg$color[class_agg$Match == 0 & class_agg$HER2 == "Positive"]<-"darkmagenta"
+class_agg$color[class_agg$Match == 0 & class_agg$high_erbb2 == "high" & class_agg$HER2 != "Positive"]<-"green"
+
+###FIGURE 5###
+alluvial(class_agg[,c(2,1)], freq=class_agg$freq, border = NA, 
+         col = class_agg$color)
+```
+
+```{r reclassification and tamoxifen survival}
+recount_meta <- recount::all_metadata("tcga")
+recount_meta = recount_meta[recount_meta$gdc_cases.project.project_id == "TCGA-BRCA",]
+recount_meta = recount_meta[,colSums(is.na(recount_meta))<nrow(recount_meta)]
+tam = c("Tamoxifen","tamoxifen")
+Tamoxifen = recount_meta[recount_meta$cgc_drug_therapy_drug_name %in% c("Tamoxifen","tamoxifen") ,]
+Tamoxifen = data.frame(Tamoxifen[,grep("cgc_drug_therapy_drug_name|days_to_death|vital|gdc_cases.submitter_id|gdc_cases.diagnoses.days_to_last_follow_up",colnames(Tamoxifen))])
+
+
+colnames(Tamoxifen)[1] = "Sample"
+Tamoxifen$Status[Tamoxifen$gdc_cases.diagnoses.vital_status == "dead"] <- 1
+Tamoxifen$Status[Tamoxifen$gdc_cases.diagnoses.vital_status == "alive"] <- 0
+Tamoxifen$Time[Tamoxifen$gdc_cases.diagnoses.vital_status == "dead"] <- Tamoxifen$gdc_cases.diagnoses.days_to_death[Tamoxifen$gdc_cases.diagnoses.vital_status == "dead"] 
+Tamoxifen$Time[Tamoxifen$gdc_cases.diagnoses.vital_status == "alive"] <- Tamoxifen$gdc_cases.diagnoses.days_to_last_follow_up[Tamoxifen$gdc_cases.diagnoses.vital_status == "alive"] 
+
+#Merge with the classifications 
+Prop.TCGA.SC.Model.Stage2.Class.tam = Prop.TCGA.SC.Model.Stage2.Class.path
+Prop.TCGA.SC.Model.Stage2.Class.tam = Prop.TCGA.SC.Model.Stage2.Class.tam[,c(1,7:10)]
+
+Prop.TCGA.SC.Model.Stage2.Class.tam$high_path_erbb2[Prop.TCGA.SC.Model.Stage2.Class.tam$hsa04012 > 153]<- "high"
+Prop.TCGA.SC.Model.Stage2.Class.tam$high_path_erbb2[Prop.TCGA.SC.Model.Stage2.Class.tam$hsa04012 < 153]<- "not_high"
+
+Prop.TCGA.SC.Model.Stage2.Class.tam$hsa04012 = NULL
+Prop.TCGA.SC.Model.Stage2.Class.tam$Sample = gsub("-01","",Prop.TCGA.SC.Model.Stage2.Class.tam$Sample)
+Prop.TCGA.SC.Model.Stage2.Class.tam$Sample = gsub("-11","",Prop.TCGA.SC.Model.Stage2.Class.tam$Sample)
+
+Tamoxifen = merge(Tamoxifen,Prop.TCGA.SC.Model.Stage2.Class.tam, by = "Sample")
+Tamoxifen = Tamoxifen[,c(1,12:17)]
+Tamoxifen = Tamoxifen[Tamoxifen$PAM50Classification %in% c("LumB","LumA"),]
+Tamoxifen = Tamoxifen[Tamoxifen$NewClassification %in% c("Luminal","Her2"),]
+
+Tamoxifen$Group  = NA
+Tamoxifen$Group[Tamoxifen$NewClassification %in% c("Luminal")] <- "LumLum"
+Tamoxifen$Group[Tamoxifen$NewClassification %in% c("Her2")] <- "LumHer2"
+
+sfit_reclass <- survfit(Surv(Time, Status)~Group, data=Tamoxifen)
+
+###FIGURE 7###
+pdf("surv_reclass.pdf")
+
+ggsurvplot(sfit_reclass, pval=TRUE, risk.table = TRUE, legend.title="Classification",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Kaplan-Meier Curve for Tamoxifen Survival",risk.table.height=.15,font.main = c(30, "plain", "black"),
+           font.x = c(20, "plain", "black"), font.y = c(20, "plain", "black"),
+           font.tickslab = c(12, "plain", "black"),font.legend = c(20,"plain", "black"))
+
+dev.off()
+
+Tamoxifen_ihc = Tamoxifen[Tamoxifen$HER2 %in% c("Negative","Positive"),]
+sfit_ihc <- survfit(Surv(Time, Status)~HER2, data=Tamoxifen_ihc)
+
+###FIGURE 7###
+pdf("surv_reclass.pdf")
+ggsurvplot(sfit_ihc, pval=TRUE, risk.table = TRUE, legend.title="Classification",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Kaplan-Meier Curve for Tamoxifen Survival",risk.table.height=.15,font.main = c(30, "plain", "black"),
+           font.x = c(20, "plain", "black"), font.y = c(20, "plain", "black"),
+           font.tickslab = c(12, "plain", "black"),font.legend = c(20,"plain", "black"))
+dev.off()
+
+Tamoxifen_path = Tamoxifen[Tamoxifen$high_path_erbb2 %in% c("high","not_high")]
+sfit_path <- survfit(Surv(Time, Status)~high_path_erbb2, data=Tamoxifen)
+
+ggsurvplot(sfit_path, pval=TRUE, risk.table = TRUE, legend.title="Classification",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Kaplan-Meier Curve for Tamoxifen Survival",risk.table.height=.15,font.main = c(30, "plain", "black"),
+           font.x = c(20, "plain", "black"), font.y = c(20, "plain", "black"),
+           font.tickslab = c(12, "plain", "black"),font.legend = c(20,"plain", "black"))
+```
+
+```{r Stage 2 single cell new XDec classification}
+XDec_HER2_Samples = Prop.TCGA.SC.Model.Stage2.Class$Sample[Prop.TCGA.SC.Model.Stage2.Class$NewClassification == "Her2"]
+XDec_Other_Samples = Prop.TCGA.SC.Model.Stage2.Class$Sample[Prop.TCGA.SC.Model.Stage2.Class$NewClassification == "Other"]
+XDec_Basal_Samples = Prop.TCGA.SC.Model.Stage2.Class$Sample[Prop.TCGA.SC.Model.Stage2.Class$NewClassification == "Basal"]
+XDec_Luminal_Samples = Prop.TCGA.SC.Model.Stage2.Class$Sample[Prop.TCGA.SC.Model.Stage2.Class$NewClassification == "Luminal"]
+XDec_Normal_Samples = Prop.TCGA.SC.Model.Stage2.Class$Sample[Prop.TCGA.SC.Model.Stage2.Class$NewClassification == "Control"]
+
+#Combine Stromal Props
+Prop.TCGA.SC.Model.Stage2.Combine = Prop.TCGA.SC.Model.Stage2
+Prop.TCGA.SC.Model.Stage2.Combine$Stromal = Prop.TCGA.SC.Model.Stage2.Combine$Adipocyte + Prop.TCGA.SC.Model.Stage2.Combine$CAF
+Prop.TCGA.SC.Model.Stage2.Combine$Adipocyte = NULL
+Prop.TCGA.SC.Model.Stage2.Combine$CAF = NULL
+
+## Epithelial.Her2
+TCGA.Reads.EpithelialHer = as.matrix(TCGA.Reads[,XDec_HER2_Samples])
+Prop.TCGA.SC.Model.EpithelialHer = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[XDec_HER2_Samples,])
+Stage2.SC.Model.EpithelialHer = EDec::run_edec_stage_2(TCGA.Reads.EpithelialHer, Prop.TCGA.SC.Model.EpithelialHer)
+Stage2.SC.Model.EpithelialHer.means = as.data.frame(Stage2.SC.Model.EpithelialHer$means) 
+Stage2.SC.Model.EpithelialHer.std = as.data.frame(Stage2.SC.Model.EpithelialHer$std.errors)
+
+Stage2.SC.Model.EpithelialHer.means = as.data.frame(Stage2.SC.Model.EpithelialHer.means)
+colnames(Stage2.SC.Model.EpithelialHer.means) = paste(colnames(Stage2.SC.Model.EpithelialHer.means),"Her2", sep = "-")
+Stage2.SC.Model.EpithelialHer.means$Genes = rownames(Stage2.SC.Model.EpithelialHer.means)
+
+Stage2.SC.Model.EpithelialHer.std = as.data.frame(Stage2.SC.Model.EpithelialHer.std)
+colnames(Stage2.SC.Model.EpithelialHer.std) = paste(colnames(Stage2.SC.Model.EpithelialHer.std),"Her2", sep = "-")
+Stage2.SC.Model.EpithelialHer.std$Genes = rownames(Stage2.SC.Model.EpithelialHer.std)
+
+## Epithelial.Other
+TCGA.Reads.EpithelialOther = as.matrix(TCGA.Reads[,XDec_Other_Samples])
+Prop.TCGA.SC.Model.EpithelialOther = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[XDec_Other_Samples,])
+Stage2.SC.Model.EpithelialOther = EDec::run_edec_stage_2(TCGA.Reads.EpithelialOther, Prop.TCGA.SC.Model.EpithelialOther)
+Stage2.SC.Model.EpithelialOther.means = as.data.frame(Stage2.SC.Model.EpithelialOther$means) 
+Stage2.SC.Model.EpithelialOther.std = as.data.frame(Stage2.SC.Model.EpithelialOther$std.errors)
+
+Stage2.SC.Model.EpithelialOther.means = as.data.frame(Stage2.SC.Model.EpithelialOther.means)
+colnames(Stage2.SC.Model.EpithelialOther.means) = paste(colnames(Stage2.SC.Model.EpithelialOther.means),"Other", sep = "-")
+Stage2.SC.Model.EpithelialOther.means$Genes = rownames(Stage2.SC.Model.EpithelialOther.means)
+
+Stage2.SC.Model.EpithelialOther.std = as.data.frame(Stage2.SC.Model.EpithelialOther.std)
+colnames(Stage2.SC.Model.EpithelialOther.std) = paste(colnames(Stage2.SC.Model.EpithelialOther.std),"Other", sep = "-")
+Stage2.SC.Model.EpithelialOther.std$Genes = rownames(Stage2.SC.Model.EpithelialOther.std)
+
+## Epithelial.Basal
+TCGA.Reads.EpithelialBasal = as.matrix(TCGA.Reads[,XDec_Basal_Samples])
+Prop.TCGA.SC.Model.EpithelialBasal = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[XDec_Basal_Samples,])
+Stage2.SC.Model.EpithelialBasal = EDec::run_edec_stage_2(TCGA.Reads.EpithelialBasal, Prop.TCGA.SC.Model.EpithelialBasal)
+Stage2.SC.Model.EpithelialBasal.means = as.data.frame(Stage2.SC.Model.EpithelialBasal$means) 
+Stage2.SC.Model.EpithelialBasal.std = as.data.frame(Stage2.SC.Model.EpithelialBasal$std.errors)
+
+Stage2.SC.Model.EpithelialBasal.means = as.data.frame(Stage2.SC.Model.EpithelialBasal.means)
+colnames(Stage2.SC.Model.EpithelialBasal.means) = paste(colnames(Stage2.SC.Model.EpithelialBasal.means),"Basal", sep = "-")
+Stage2.SC.Model.EpithelialBasal.means$Genes = rownames(Stage2.SC.Model.EpithelialBasal.means)
+
+Stage2.SC.Model.EpithelialBasal.std = as.data.frame(Stage2.SC.Model.EpithelialBasal.std)
+colnames(Stage2.SC.Model.EpithelialBasal.std) = paste(colnames(Stage2.SC.Model.EpithelialBasal.std),"Basal", sep = "-")
+Stage2.SC.Model.EpithelialBasal.std$Genes = rownames(Stage2.SC.Model.EpithelialBasal.std)
+
+## Epithelial.Luminal
+TCGA.Reads.EpithelialLuminal = as.matrix(TCGA.Reads[,XDec_Luminal_Samples])
+Prop.TCGA.SC.Model.EpithelialLuminal = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[XDec_Luminal_Samples,])
+Stage2.SC.Model.EpithelialLuminal = EDec::run_edec_stage_2(TCGA.Reads.EpithelialLuminal, Prop.TCGA.SC.Model.EpithelialLuminal)
+Stage2.SC.Model.EpithelialLuminal.means = as.data.frame(Stage2.SC.Model.EpithelialLuminal$means) 
+Stage2.SC.Model.EpithelialLuminal.std = as.data.frame(Stage2.SC.Model.EpithelialLuminal$std.errors)
+
+Stage2.SC.Model.EpithelialLuminal.means = as.data.frame(Stage2.SC.Model.EpithelialLuminal.means)
+colnames(Stage2.SC.Model.EpithelialLuminal.means) = paste(colnames(Stage2.SC.Model.EpithelialLuminal.means),"Luminal", sep = "-")
+Stage2.SC.Model.EpithelialLuminal.means$Genes = rownames(Stage2.SC.Model.EpithelialLuminal.means)
+
+Stage2.SC.Model.EpithelialLuminal.std = as.data.frame(Stage2.SC.Model.EpithelialLuminal.std)
+colnames(Stage2.SC.Model.EpithelialLuminal.std) = paste(colnames(Stage2.SC.Model.EpithelialLuminal.std),"Luminal", sep = "-")
+Stage2.SC.Model.EpithelialLuminal.std$Genes = rownames(Stage2.SC.Model.EpithelialLuminal.std)
+
+## Epithelial.Normal
+TCGA.Reads.EpithelialNormal = as.matrix(TCGA.Reads[,XDec_Normal_Samples])
+Prop.TCGA.SC.Model.EpithelialNormal = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[XDec_Normal_Samples,])
+Stage2.SC.Model.EpithelialNormal = EDec::run_edec_stage_2(TCGA.Reads.EpithelialNormal, Prop.TCGA.SC.Model.EpithelialNormal)
+Stage2.SC.Model.EpithelialNormal.means = as.data.frame(Stage2.SC.Model.EpithelialNormal$means) 
+Stage2.SC.Model.EpithelialNormal.std = as.data.frame(Stage2.SC.Model.EpithelialNormal$std.errors)
+
+Stage2.SC.Model.EpithelialNormal.means = as.data.frame(Stage2.SC.Model.EpithelialNormal.means)
+colnames(Stage2.SC.Model.EpithelialNormal.means) = paste(colnames(Stage2.SC.Model.EpithelialNormal.means),"Normal", sep = "-")
+Stage2.SC.Model.EpithelialNormal.means$Genes = rownames(Stage2.SC.Model.EpithelialNormal.means)
+
+Stage2.SC.Model.EpithelialNormal.std = as.data.frame(Stage2.SC.Model.EpithelialNormal.std)
+colnames(Stage2.SC.Model.EpithelialNormal.std) = paste(colnames(Stage2.SC.Model.EpithelialNormal.std),"Normal", sep = "-")
+Stage2.SC.Model.EpithelialNormal.std$Genes = rownames(Stage2.SC.Model.EpithelialNormal.std)
+
+## Combine
+Stage2.SC.Model.Means.Epi = list(Stage2.SC.Model.EpithelialHer.means, Stage2.SC.Model.EpithelialOther.means, Stage2.SC.Model.EpithelialBasal.means, Stage2.SC.Model.EpithelialLuminal.means, Stage2.SC.Model.EpithelialNormal.means) %>% 
+  Reduce(function(dtf1,dtf2) full_join(dtf1,dtf2,by="Genes"), .)
+rownames(Stage2.SC.Model.Means.Epi) = Stage2.SC.Model.Means.Epi$Genes
+
+Stage2.SC.Model.std.Epi = list(Stage2.SC.Model.EpithelialHer.std, Stage2.SC.Model.EpithelialOther.std, Stage2.SC.Model.EpithelialBasal.std, Stage2.SC.Model.EpithelialLuminal.std, Stage2.SC.Model.EpithelialNormal.std) %>% 
+  Reduce(function(dtf1,dtf2) full_join(dtf1,dtf2,by="Genes"), .)
+rownames(Stage2.SC.Model.std.Epi) = Stage2.SC.Model.std.Epi$Genes
+Stage2.SC.Model.std.Epi$Genes = NULL
+Stage2.SC.Model.std.Epi.no.other = Stage2.SC.Model.std.Epi[,-c(4:6)]
+
+```
+
+```{r Stage 2 new XDec subtypes plots}
+
+plot_list_all_genes_epi = list()
+for(gene in all_genes_cell_type){
+  x_mean = melt(Stage2.SC.Model.Means.Epi[gene,])
+  x_std = melt(Stage2.SC.Model.std.Epi[gene,])
+  colnames(x_mean)[3] = "counts"
+  colnames(x_std)[3] = "std.error"
+  x_mean_std = merge(x_mean,x_std,by = c("Genes","variable"))
+  x_mean_std <- x_mean_std %>% separate(variable, c("cell_type", "subtype"), "-")
+  plot_name_file = paste(gene,"Boxplot.ExDec.png")
+  plot = ggplot(x_mean_std,aes(x = cell_type , y = counts, fill = subtype)) + geom_bar(stat="identity", position = "dodge") + 
+    geom_errorbar(aes(ymax = counts + std.error, ymin = ifelse(counts - std.error < 0, 0, counts - std.error)), position = position_dodge(0.95), width = 0.25) +
+    scale_fill_brewer(palette = "Set1") + ggtitle(gene) 
+  plot_list_all_genes_epi[[gene]] = plot
+}
+
+
+png("Stage2_XDec_subypes.png",4000,1000)
+multiplot(plot_list_all_genes[[1]], plot_list_all_genes[[2]], plot_list_all_genes[[3]], plot_list_all_genes[[4]], plot_list_all_genes[[5]],
+          plot_list_all_genes[[6]], plot_list_all_genes[[7]], plot_list_all_genes[[8]], plot_list_all_genes[[9]],plot_list_all_genes[[10]],
+          plot_list_all_genes[[11]],plot_list_all_genes[[12]],plot_list_all_genes[[13]],plot_list_all_genes[[14]],plot_list_all_genes[[15]],
+          plot_list_all_genes[[16]], cols = 4)
+dev.off()
+```
+
+```{r compare Stage 2 XDec epithelial profiles to cell lines}
+Pam50.Genes = c("UBE2T","BIRC5","NUF2","CDC6","CCNB1","TYMS","MYBL2","CEP55","MELK","NDC80","RRM2","UBE2C","CENPF","PTTG1","EXO1","ANLN","CCNE1","CDC20","MKI67","KIF2C","ACTR3B","MYC","EGFR","KRT5","PHGDH","CDH3","MIA","KRT17","FOXC1","SFRP1","KRT14","ESR1","SLC39A6","BAG1","MAPT","PGR","CXXC5","MLPH","BCL2","MDM2","NAT1","FOXA1","BLVRA","MMP11","GPR160","FGFR4","GRB7","TMEM45B","ERBB2")
+
+Broad.CellLines.Metadata = read.table("BroadCellLines_Metadata.txt", header = TRUE, check.names = FALSE, sep = " ", row.names = NULL)
+Stage2.Broad.CellLines = read.table("BroadCellLines_Genes.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+rownames(Stage2.Broad.CellLines) = Stage2.Broad.CellLines$row.names
+
+pam50_cell_lines = read.table("BroadCellLines_Metadata_Jiang.txt")
+pam50_cell_lines$subtype[pam50_cell_lines$subtype %in% c("Normal-Like","HMC18")] <- "unclassified"
+pam50_cell_lines$subtype[pam50_cell_lines$subtype %in% c("TNB")] <- "Basal"
+
+#Broad Cell lines are in TPM - normalize stage 2 to TPM 
+Stage2.SC.Means = Stage2.SC.Model.Means.Epi[,grep(pattern = "Epithelial", colnames(Stage2.SC.Model.Means.Epi))]
+Stage2.SC.Means.TPM = t(t(Stage2.SC.Means)*1e6/colSums(Stage2.SC.Means))
+Stage2.SC.Means.TPM.Pam50 = as.data.frame(Stage2.SC.Means.TPM[Pam50.Genes,])
+Stage2.SC.Means.TPM.Pam50$Genes = rownames(Stage2.SC.Means.TPM.Pam50)
+
+Stage2.Broad.CellLines$row.names = NULL
+Stage2.Broad.CellLines$gene_id = NULL
+Stage2.Broad.CellLines$Genes = rownames(Stage2.Broad.CellLines)
+
+Stage2.SC.Means.TPM.Pam50.Broad = merge(Stage2.SC.Means.TPM.Pam50, Stage2.Broad.CellLines, by = "Genes")
+rownames(Stage2.SC.Means.TPM.Pam50.Broad) = Stage2.SC.Means.TPM.Pam50.Broad$Genes
+Stage2.SC.Means.TPM.Pam50.Broad$Genes = NULL
+Broad.CellLines.Metadata$Cell_Line = paste(Broad.CellLines.Metadata$Cell_Line,"_BREAST")
+Stage2.SC.Means.TPM.Pam50.Broad.Meta = as.character(Broad.CellLines.Metadata$Cell_Line)
+
+png("Cell_line_comp.png",1000,1000)
+heatmap.2(as.matrix(cor(Stage2.SC.Means.TPM.Pam50.Broad[,-c(5)])),
+          trace = "none", col = my_palette_1, breaks = col_breaks_1,
+          key = FALSE, cexCol = 1, Colv = TRUE, margins = c(10,10))
+dev.off()
+```
+
+```{R compare cell type clusters vs props and pam50}
+
+props_cell = read.table("props_cell_lines.txt",header = TRUE)
+props_cell = props_cell[,c("sampleID","Epithelial_Her2","Epithelial_Basal","Epithelial_Luminal","Epithelial_All")]
+props_cells_other = read.table("props_cell_lines_not_rep.txt",header = TRUE)
+props_cells_other$Epithelial_All = props_cells_other$Epithelial_Basal + props_cells_other$Epithelial_Control + props_cells_other$Epithelial_Her2 + props_cells_other$Epithelial_Luminal 
+props_cells_other = props_cells_other[,c("sampleID","Epithelial_Her2","Epithelial_Basal","Epithelial_Luminal","Epithelial_All")]
+
+props_cell = rbind(props_cell,props_cells_other)
+
+
+#Remove cell lines that look more stromal
+props_cell = props_cell[props_cell$Epithelial_All > 0.7,]
+
+#Assign the highest proportion
+props_cell$high_prop = colnames(props_cell[,2:4])[max.col(props_cell[,2:4],ties.method="first")]
+props_cell$high_prop = gsub("Epithelial_","",props_cell$high_prop)
+
+#Clustering class 
+cluster_class = read.table("pam50_clusters_cell_lines.txt",header = TRUE)
+
+cluster_class$cluster[cluster_class$cluster == "basal"]<- "Basal"
+cluster_class$cluster[cluster_class$cluster == "her2"]<- "Her2"
+cluster_class$cluster[cluster_class$cluster == "luminal"]<- "Luminal"
+colnames(cluster_class)[2] = "sampleID"
+cluster_class_prop = merge(cluster_class,props_cell,by = "sampleID")
+colnames(pam50_cell_lines)[1] = "sampleID"
+
+
+cluster_class_prop = merge(cluster_class_prop,pam50_cell_lines,by = "sampleID")
+colnames(cluster_class_prop)[8] = "pam50"
+cluster_class_prop = cluster_class_prop[c(2,7,8)]
+cluster_class_pam50 = cluster_class_prop[c(2,3)]
+cluster_class_prop = cluster_class_prop[c(1,2)]
+cluster_class_pam50$pam50[cluster_class_pam50$pam50 %in% "HER2"]<- "Her2"
+
+
+table_cluster_class_prop = data.frame(table(cluster_class_prop))
+table_cluster_class_prop$cluster  = as.character(table_cluster_class_prop$cluster)
+table_cluster_class_prop$high_prop = as.character(table_cluster_class_prop$high_prop)
+
+table_cluster_class_PAM50 = data.frame(table(cluster_class_pam50 ))
+table_cluster_class_PAM50$pam50  = as.character(table_cluster_class_PAM50$pam50)
+table_cluster_class_PAM50$high_prop = as.character(table_cluster_class_PAM50$high_prop)
+
+
+table_cluster_class_prop$match[table_cluster_class_prop$cluster == table_cluster_class_prop$high_prop]<-"Yes"
+table_cluster_class_prop$match[table_cluster_class_prop$cluster != table_cluster_class_prop$high_prop]<-"No"
+
+ggplot(data = table_cluster_class_prop,
+       aes(axis1 = cluster, axis2 = high_prop,y = Freq)) +
+  scale_x_discrete(limits = c("cluster", "high_prop"), expand = c(.2, .05)) +
+  geom_alluvium(aes(fill = match)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal() +
+  ggtitle("Clustering Classification vs Highest Proportion")
+
+
+table_cluster_class_PAM50$match[table_cluster_class_PAM50$high_prop == table_cluster_class_PAM50$pam50]<-"Yes"
+table_cluster_class_PAM50$match[table_cluster_class_PAM50$high_prop != table_cluster_class_PAM50$pam50]<-"No"
+
+
+pdf("cell_line_prop.pdf")
+ggplot(data = table_cluster_class_PAM50,
+       aes(axis1 = pam50, axis2 = high_prop,y = Freq)) +
+  scale_x_discrete(limits = c("pam50", "high_prop"), expand = c(.2, .05)) +
+  geom_alluvium(aes(fill = match)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal() +
+  ggtitle("Highest Proportion vs PAM50")
+dev.off()
+
+
+```
+
+### Single Cell Deconvolution Stage 2 Methylation and Other Methylation Analysis----
+
+```{r methylation Stage 2 and compare to EDec }
+methy = read.table("HumanMethylation450", header = TRUE)
+rownames(methy) = methy$sample
+methy$sample = NULL
+methy = na.omit(methy)
+colnames(methy) = gsub("\\.","-",colnames(methy) )
+
+methy.Control = as.matrix(methy[,colnames(methy) %in% XDec_Normal_Samples])
+methy.Basal = as.matrix(methy[,colnames(methy) %in% XDec_Basal_Samples])
+
+methy.props.Control = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[rownames(Prop.TCGA.SC.Model.Stage2.Combine) %in% colnames(methy.Control),])
+methy.props.Basal = as.matrix(Prop.TCGA.SC.Model.Stage2.Combine[rownames(Prop.TCGA.SC.Model.Stage2.Combine) %in% colnames(methy.Basal),])
+
+#Control
+Stage2.methy.Control = EDec::run_edec_stage_2(methy.Control, methy.props.Control)
+Stage2.methy.Control.means = as.data.frame(Stage2.methy.Control$means) 
+Stage2.methy.Control.std = as.data.frame(Stage2.methy.Control$std.errors)
+Stage2.methy.Control.means = as.data.frame(Stage2.methy.Control.means)
+colnames(Stage2.methy.Control.means) = paste(colnames(Stage2.methy.Control.means),"Control", sep = "_")
+Stage2.methy.Control.means$loci = rownames(Stage2.methy.Control.means)
+Stage2.methy.Control.std = as.data.frame(Stage2.methy.Control.std)
+colnames(Stage2.methy.Control.std) = paste(colnames(Stage2.methy.Control.std),"Control", sep = "_")
+Stage2.methy.Control.std$loci = rownames(Stage2.methy.Control.std)
+
+
+#Basal
+Stage2.methy.Basal = EDec::run_edec_stage_2(methy.Basal, methy.props.Basal)
+Stage2.methy.Basal.means = as.data.frame(Stage2.methy.Basal$means) 
+Stage2.methy.Basal.std = as.data.frame(Stage2.methy.Basal$std.errors)
+Stage2.methy.Basal.means = as.data.frame(Stage2.methy.Basal.means)
+colnames(Stage2.methy.Basal.means) = paste(colnames(Stage2.methy.Basal.means),"Basal", sep = "_")
+Stage2.methy.Basal.means$loci = rownames(Stage2.methy.Basal.means)
+Stage2.methy.Basal.std = as.data.frame(Stage2.methy.Basal.std)
+colnames(Stage2.methy.Basal.std) = paste(colnames(Stage2.methy.Basal.std),"Basal", sep = "_")
+Stage2.methy.Basal.std$loci = rownames(Stage2.methy.Basal.std)
+
+
+#Load Vitor's EDec methylation Stage 1 
+methy_Vitor = read.table("EstimatedCellTypeSpecificMethylationTCGA.txt", sep = "\t", header = TRUE)
+colnames(methy_Vitor)[1] = "loci"
+methy_Vitor_all = Reduce(function(x, y) merge(x, y), list(methy_Vitor, Stage2.methy.Basal.means,Stage2.methy.Control.means))
+methy_Vitor_all = methy_Vitor_all[c(1,3,7,10,13)]
+colnames(methy_Vitor_all)[2] = "Epithelial_Basal_methy"
+colnames(methy_Vitor_all)[3] = "Epithelial_Normal_methy"
+
+cor(methy_Vitor_all$Epithelial_Basal_methy,methy_Vitor_all$Epithelial_Basal)
+
+plot(methy_Vitor_all$Epithelial_Basal_methy,methy_Vitor_all$Epithelial_Basal, xlim = c(0,1), ylim = c(0,1), main = "Basal Epithelial  Profiles", xlab = "EDec Methylation", ylab = "XDec Methylation", col = "black", pch = 20)
+
+cor(methy_Vitor_all$Epithelial_Normal_methy,methy_Vitor_all$Epithelial_Control)
+
+plot(methy_Vitor_all$Epithelial_Normal_methy,methy_Vitor_all$Epithelial_Control, xlim = c(0,1), ylim = c(0,1), main = "Control Epithelial  Profiles", xlab = "EDec Methylation", ylab = "XDec Methylation", col = "black", pch = 20)
+```
+
+```{r methylation variance analysis}
+#Read in the top 5,000 most variable genes/loci and PCAs 
+#Most variable genes/loci are determined by IQR
+
+methy_prop = read.table("props_rnaseq_methy.txt")
+exp_prop = read.table("props_rnaseq_exp.txt")
+methy_pca = read.table("methy_pca.txt")
+exp_pca = read.table("exp_pca.txt")
+
+
+cpg_list_prop_3 = list()
+for(i in 10:5009){
+  df = methy_prop[,c(1,7,9,i)]
+  name = colnames(methy_prop)[i]
+  print(i - 9)
+  colnames(df)[4] = "probe"
+  fit <- train(probe ~ .,  
+               data = df,
+               method = "glm")
+  r2 = fit$results$Rsquared
+  cpg_list_prop_3[[name]] = r2
+}
+cpg_df_prop_3 = data.frame(cpg_list_prop_3)
+cpg_df_prop_3 = data.frame(t(cpg_df_prop_3))
+
+
+gene_list_prop_3 = list()
+for(i in 10:5009){
+  df = exp_prop[,c(1,7,9,i)]
+  name = colnames(exp_prop)[i]
+  print(i - 9)
+  colnames(df)[4] = "gene"
+  fit <- train(gene ~ .,  
+               data = df,
+               method = "glm")
+  r2 = fit$results$Rsquared
+  gene_list_prop_3[[name]] = r2
+}
+
+gene_df_prop_3 = data.frame(gene_list_prop_3)
+gene_df_prop_3 = data.frame(t(gene_df_prop_3))
+
+methy_pca = read.table("methy_pca.txt")
+exp_pca = read.table("exp_pca.txt")
+
+cpg_list_pca_3 = list()
+for(i in 10:5009){
+  df = methy_pca[,c(1:9,i)]
+  name = colnames(methy_pca)[i]
+  print(i - 3)
+  colnames(df)[4] = "probe"
+  fit <- train(probe ~ .,  
+               data = df,
+               method = "glm")
+  r2 = fit$results$Rsquared
+  cpg_list_pca_3[[name]] = r2
+}
+cpg_df_pca_3 = data.frame(cpg_list_pca_3)
+cpg_df_pca_3 = data.frame(t(cpg_df_pca_3))
+
+
+gene_list_pca_3 = list()
+for(i in 10:5009){
+  df = exp_pca[,c(1:3,i)]
+  name = colnames(exp_pca)[i]
+  print(i - 9)
+  colnames(df)[4] = "gene"
+  fit <- train(gene ~ .,  
+               data = df,
+               method = "glm")
+  r2 = fit$results$Rsquared
+  gene_list_pca_3[[name]] = r2
+}
+
+gene_df_pca_3 = data.frame(gene_list_pca_3)
+gene_df_pca_3 = data.frame(t(gene_df_pca_3))
+
+gene_df_prop_3$gene = rownames(gene_df_prop_3)
+colnames(gene_df_prop_3)[1] = "props"
+
+gene_df_pca_3$gene = rownames(gene_df_pca_3)
+colnames(gene_df_pca_3)[1] = "pca"
+
+gene_prop_pca_3 = merge(gene_df_prop_3,gene_df_pca_3, by = "gene")
+rownames(gene_prop_pca_3) = gene_prop_pca_3$gene
+gene_prop_pca_3$gene = NULL
+
+cpg_df_prop_3$cpg = rownames(cpg_df_prop_3)
+colnames(cpg_df_prop_3)[1] = "props"
+
+cpg_df_pca_3$cpg = rownames(cpg_df_pca_3)
+colnames(cpg_df_pca_3)[1] = "pca"
+
+cpg_prop_pca_3 = merge(cpg_df_prop_3,cpg_df_pca_3, by = "cpg")
+rownames(cpg_prop_pca_3) = cpg_prop_pca_3$cpg
+cpg_prop_pca_3$cpg = NULL
+
+boxplot(gene_prop_pca_3$pca,gene_prop_pca_3$props)
+boxplot(cpg_prop_pca_3$pca,cpg_prop_pca_3$props)
+
+gene_prop_pca_melt_3 = melt(gene_prop_pca_3)
+
+png("variance_genes_3.png")
+ggplot2::ggplot(gene_prop_pca_melt_3, aes(x=variable, y=value)) + 
+  geom_boxplot(notch=TRUE) + ylab("Variance Explained") +ggtitle("Variance PCA(1-3) vs Epithelial Proportions (3)")
+pdf("variance_genes_3.pdf")
+ggplot2::ggplot(gene_prop_pca_melt_3, aes(x=variable, y=value)) + 
+  geom_boxplot(notch=TRUE) + ylab("Variance Explained") +ggtitle("Variance PCA(1-3) vs Epithelial Proportions (3)")
+dev.off()
+
+cpg_prop_pca_melt_3 = melt(cpg_prop_pca_3)
+
+png("variance_cpgs_3.png")
+ggplot2::ggplot(cpg_prop_pca_melt_3, aes(x=variable, y=value)) + 
+  geom_boxplot(notch=TRUE) + ylab("Variance Explained") +ggtitle("Variance PCA(1-3) vs Epithelial Proportions (3)")
+dev.off()
+
+pdf("variance_cpgs_3.pdf")
+ggplot2::ggplot(cpg_prop_pca_melt_3, aes(x=variable, y=value)) + 
+  geom_boxplot(notch=TRUE) + ylab("Variance Explained") +ggtitle("Variance PCA(1-3) vs Epithelial Proportions (3)")
+dev.off()
+```
+
+```{r methylation prediction}
+methy_prop = methy_prop[,c(1,7,9,10:5009)]
+set.seed(1234)
+
+rows <- sample(nrow(methy_prop))
+props_rnaseq_methy = methy_prop[rows,]
+
+props_rnaseq_methy_train = props_rnaseq_methy[1:699,]
+props_rnaseq_methy_test = props_rnaseq_methy[700:873,]
+
+#For each of the cpgs predict 
+  
+trainControl_LOOCV <- trainControl(
+  method = "LOOCV", savePredictions=TRUE)
+
+cpg_list = list()
+for(i in 4:5003){
+  print(i)
+  df = props_rnaseq_methy_train[,c(1:3,i)]
+  name = colnames(props_rnaseq_methy_train)[i]
+  colnames(df)[4] = "probe"
+  test = props_rnaseq_methy_test[,c(1:3,i)]
+  colnames(test)[4] = "probe"
+ fit <- train(probe ~ .,  
+  data = df,
+  method = "svmRadial")
+predictions <- fit %>% predict(test[,1:3], type = "raw")
+prediction = data.frame(predictions)
+rownames(prediction)  = rownames(test)
+df_pred_obs = cbind(prediction,test$probe)
+cpg_list[[name]] = predictions}
+
+cpg_df = data.frame(cpg_list)
+rownames(cpg_df) = rownames(props_rnaseq_methy_test)
+
+#Correlate 2 dataframes
+
+test_cpgs = props_rnaseq_methy_test[,-c(1:3)]
+
+cor(cpg_df,test_cpgs)
+x = diag(cor(cpg_df,test_cpgs))
+x = data.frame(x)
+x$group = "Correlation Cpg"
+
+ggplot2::ggplot(x, aes(x=group, y=x)) + 
+  geom_boxplot(notch=TRUE) + ylab("Correlation") +ggtitle("Correlation Predicted vs Observed")
+
+remove(methy)
+remove(methy.Basal)
+remove(methy.Control)
+remove(methy.props.Basal)
+remove(methy.props.Control)
+remove(methy_pca)
+remove(methy_Vitor_all)
+remove(methy_prop)
+remove(methy_Vitor)
+```
+
+
+####Response Predictions---
+
+```{r cell line predictions LOOCV}
+props_cell_all = read.table("props_cell_lines.txt",header = TRUE)
+#Remove cell lines that look more stromal
+props_cell_all = props_cell_all[props_cell_all$Epithelial_All > 0.7,]
+map = read.csv("Cell_lines_annotations_20181226.csv")
+#https://www.cancerrxgene.org/gdsc1000/GDSC1000_WebResources/Home.html
+all_drugs = read.table("all_drug.txt",sep = "\t",header = TRUE)
+#Log ic50
+ic50 = read.table("ic50.txt",sep = "\t",header = TRUE)
+auc = read.table("auc_response.txt",sep = "\t",header = TRUE)
+binary_response = read.table("binary_response.txt",sep = "\t",header = TRUE)
+
+#map$Name to join 
+props_cell_all$sampleID = paste(props_cell_all$sampleID,"_BREAST",sep ="")
+colnames(map)[1] = "sampleID"
+props_cell_all = merge(props_cell_all,map[,c(1,3)],by = "sampleID" )
+all = Reduce(intersect, list(ic50$Sample.Names,auc$Sample.Names,props_cell_all$Name))
+
+ic50 = ic50[ic50$Sample.Names %in% all,]
+auc = auc[auc$Sample.Names %in% all,]
+props_cell_all = props_cell_all[props_cell_all$Name %in% all,]
+ic50$Cell.line.cosmic.identifiers = NULL
+auc$Cell.line.cosmic.identifiers = NULL
+
+auc = auc[,colnames(ic50)]
+rownames(ic50) = ic50$Sample.Names
+ic50$Sample.Names = NULL
+rownames(auc) = auc$Sample.Names
+auc$Sample.Names = NULL
+auc = auc[rownames(ic50),]
+
+#auc vs ic50 cor
+auc_ic50_cor = sapply(seq.int(dim(ic50)[2]), function(i) cor(na.omit(ic50[,i]), na.omit(auc[,i])))
+names(auc_ic50_cor) = colnames(ic50)
+auc_ic50_cor = data.frame(auc_ic50_cor)
+hist(auc_ic50_cor$auc_ic50_cor)
+
+props_cell_all = props_cell_all[,c(12,3,5,6)]
+
+ic50$Name = rownames(ic50)   
+auc$Name = rownames(auc)   
+
+#ic50
+table_sub_ic50 = merge(props_cell_all,ic50,by = "Name")
+rownames(table_sub_ic50) = table_sub_ic50$Name
+table_sub_ic50$Name = NULL
+
+keep = apply(table_sub_ic50, 2, function(x) length(which(!is.na(x))))
+keep = keep[keep > 5]
+keep = names(keep)
+table_sub_ic50 = table_sub_ic50[,keep]
+
+p_ic50 = list()
+p_ic50_lr = list()
+for(i in 4:ncol(table_sub_ic50)){
+  names = colnames(table_sub_ic50)[i]
+  df = table_sub_ic50[,c(1:3,i)]
+  df = na.omit(df)
+  colnames(df)[4] = "response"
+  p = lmp(lm(response~., data = df))
+  if(p < 0.05){
+print(p)
+    p_ic50[[names]] = p
+    p_ic50_lr[[names]] = lm(response~., data = df)
+  }
+}
+
+info_drug = names(p_ic50)
+info_drug = gsub("\\.","-",info_drug)
+info_drug = gsub("--rescreen-","",info_drug)
+info_drug = gsub("Bleomycin--50-uM-","Bleomycin",info_drug)
+info_drug = gsub("XAV-939","XAV 939",info_drug)
+info_drug = gsub("Bleomycin--50-uM-","Bleomycin",info_drug)
+info_drug = gsub("Afatinib--rescreen-","Afatinib",info_drug)
+info_drug = gsub("RDEA119--rescreen-","RDEA119",info_drug)
+info_drug = gsub("YK-4-279","YK 4-279",info_drug)
+info_drug = gsub("RDEA119--rescreen-","RDEA119",info_drug)
+info_drug = gsub("PLX4720--rescreen-","PLX4720",info_drug)
+info_drug = gsub("Olaparib--rescreen-","Olaparib",info_drug)
+info_drug = gsub("GDC0941--rescreen-","GDC0941",info_drug)
+info_drug = gsub("X681640","681640.00",info_drug)
+info_drug = gsub("--rescreen-","",info_drug)
+info_drug = gsub("Genentech-Cpd-10","Genentech Cpd 10",info_drug)
+info_drug = gsub("Zibotentan--ZD4054","Zibotentan, ZD4054",info_drug)
+info_drug = gsub("I-BET","I-BET 151",info_drug)
+info_drug = gsub("Tubastatin-A","Tubastatin A",info_drug)
+info_drug = gsub("VNLG-124","VNLG/124",info_drug)
+info_drug = gsub("UNC0638-1","UNC0638",info_drug)
+info_drug = gsub("TL-205","TL-2-105",info_drug)
+info_drug = gsub("TL-85","TL-1-85",info_drug)
+info_drug = gsub("Genentech-Cpd0","Genentech Cpd 10",info_drug)
+info_drug = gsub("KIN00102","CGP-60474",info_drug)
+info_drug = gsub("CAL01","CAL-101",info_drug)
+info_drug = gsub("JW-7-24","JW-7-24-1",info_drug)
+info_drug = gsub("XL84","XL-184",info_drug)
+info_drug = gsub("NPK76-II-72","NPK76-II-72-1",info_drug)
+info_drug = gsub("VX1e","VX-11e",info_drug)
+info_drug = gsub("TPCA","TPCA-1",info_drug)
+info_drug = gsub("MPS-IN","MPS-1-IN-1",info_drug)
+info_drug = gsub("X5-Fluorouracil","5-Fluorouracil",info_drug)
+info_drug = gsub("PI03","PI-103",info_drug)
+info_drug = gsub("EHT864","EHT 1864",info_drug)
+info_drug = gsub("JW-7-24-1-1","JW-7-24-1",info_drug)
+info_drug = gsub("NPK76-II-72-1-1","NPK76-II-72-1",info_drug)
+info_drug = gsub("FR80204","FR-180204",info_drug)
+info_drug = gsub("TPCA-1-1","TPCA-1",info_drug)
+info_drug = gsub("I-BET 151 151","I-BET 151",info_drug)
+info_drug = gsub("QL-X38","QL-X-138",info_drug)
+info_drug = gsub("TW-37","TW 37",info_drug)
+info_drug = gsub("CUDC01","CUDC-101",info_drug)
+info_drug = gsub("TPCA-1-1","TPCA-1",info_drug)
+info_drug = gsub("XAV-939","XAV 939",info_drug)
+info_drug = gsub("THZ-202","THZ-2-102-1",info_drug)
+info_drug = gsub("X-5Z--7-Oxozeaenol","(5Z)-7-Oxozeaenol",info_drug)
+info_drug = gsub("PXD101--Belinostat","PXD101, Belinostat",info_drug)
+info_drug = gsub("AKT-inhibitor-VIII","AKT inhibitor VIII",info_drug)
+info_drug = gsub("HG-6-64","HG-6-64-1",info_drug)
+info_drug = gsub("Mitomycin-C","Mitomycin C",info_drug)
+info_drug = gsub("Epothilone-B","Epothilone B",info_drug)
+info_drug = gsub("GSK904529A","GSK-1904529A",info_drug)
+info_drug = gsub("BAY-61-3606","BAY 61-3606",info_drug)
+info_drug = gsub("Bryostatin","Bryostatin 1",info_drug)
+info_drug = gsub("Bryostatin 1 1 1","Bryostatin 1",info_drug)
+info_drug = gsub("HG-6-64-1-1","HG-6-64-1",info_drug)
+info_drug = gsub("Obatoclax-Mesylate","Obatoclax Mesylate",info_drug)
+info_drug = gsub("PAC","PAC-1",info_drug)
+info_drug = gsub("PAC-1-1","PAC-1",info_drug)
+info_drug = gsub("X17-AAG","17-AAG",info_drug)
+info_drug = gsub("JNK-Inhibitor-VIII","JNK Inhibitor VIII",info_drug)
+info_drug = gsub("CI040","CI-1040",info_drug)
+info_drug = gsub("-1","",info_drug)
+
+
+info_drug = unique(info_drug)
+drug_meta_info = all_drugs[all_drugs$Name %in% info_drug,]
+
+trainControl_LOOCV <- trainControl(
+  method = "LOOCV", savePredictions=TRUE)
+
+#Use ic50
+info_drug_model = list()
+info_drug_pred = list()
+info_drug_RMSE = list()
+info_drug_MAE = list()
+info_drug_plot = list()
+
+info_drug_p = names(p_ic50)
+for(i in 1:length(info_drug_p)){
+  names = info_drug_p[[i]]
+  colnames = c("Epithelial_Her2","Epithelial_Basal","Epithelial_Luminal",info_drug_p[[i]])
+  df =  table_sub_ic50[,colnames]
+  df = na.omit(df)
+  colnames(df)[4] = "response"
+  fit <- train(response ~ .,  
+  data = df,
+  trControl = trainControl_LOOCV,
+  method = "glm")
+  info_drug_model[[names]] = fit$finalModel
+  pred = fit$pred[,1:2]
+  info_drug_pred[[names]] = pred
+  RMSE = RMSE(pred$pred,pred$obs)
+  info_drug_RMSE[[names]] = RMSE
+  print(RMSE)
+  MAE = MAE(pred$pred,pred$obs)
+  info_drug_MAE[[names]] = MAE
+plot = ggplot(pred, aes(x = obs,y = pred)) + geom_point() + geom_abline(intercept = 0, slope = 1) +  coord_fixed() + ggtitle(names)
+info_drug_plot[[names]] = plot }
+
+
+info_drug_MAE_melt = melt(info_drug_MAE)
+info_drug_MAE_melt = na.omit(info_drug_MAE_melt)
+colnames(info_drug_MAE_melt)[2] = "names"
+
+#Top 20 
+info_drug_MAE_melt = info_drug_MAE_melt[order(info_drug_MAE_melt$value),]
+info_drug_MAE_melt_20 = info_drug_MAE_melt[1:20,]
+info_drug_MAE_melt_20$Name = info_drug_MAE_melt_20$names
+info_drug_MAE_melt_20$Name  = gsub("\\.","-",info_drug_MAE_melt_20$Name )
+info_drug_MAE_melt_20$Name  = gsub("--rescreen-","",info_drug_MAE_melt_20$Name )
+info_drug_MAE_melt_20$Name  = gsub("Bleomycin--50-uM-","Bleomycin",info_drug_MAE_melt_20$Name )
+info_drug_MAE_melt_20$Name  = gsub("XAV-939","XAV 939",info_drug_MAE_melt_20$Name )
+
+top_20_info = merge(info_drug_MAE_melt_20,drug_meta_info,by = "Name")
+top_20_info_pathway = top_20_info[top_20_info$Targeted.process.pathway != "other",]
+
+ggplot(info_drug_MAE_melt_20, aes(x = value, y = reorder(names,-value,FUN = median))) + 
+  geom_bar(stat='identity') + ggtitle("MAE across Drugs") + xlab("MAE") + ylab("Drugs") + theme(text = element_text(size=20),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+ #1- MAE
+info_drug_MAE_melt_20_rv = info_drug_MAE_melt_20
+info_drug_MAE_melt_20_rv$value = 1- info_drug_MAE_melt_20_rv$value
+
+ggplot(info_drug_MAE_melt_20_rv, aes(x = value, y = reorder(names,value,FUN = median))) + geom_bar(stat='identity') + ggtitle("MAE across Drugs") + xlab("1 - MAE") + ylab("Drugs") + theme(text = element_text(size=20),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+dev.off()
+
+info_drug_plot$PLX4720..rescreen. + theme(text = element_text(size=20),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Log(IC50) Observed") +  ylab("Log(IC50) Predicted") + ggtitle("PLX4720")
+
+#Compare this to the MAPK scores
+pathway_scores = read.table("pathway_scores_ccle.txt")
+pathway_scores$names = rownames(pathway_scores)
+
+ic50_2 = ic50
+ic50_2 = ic50_2[,colnames(ic50_2) %in% keep]
+ic50_2$names = rownames(ic50_2)
+ic50_2$names = gsub("-","",ic50_2$names)
+ic50_2_pathway = merge(pathway_scores,ic50_2, by = "names")
+rownames(ic50_2_pathway) = ic50_2_pathway$names
+ic50_2_pathway$names = NULL
+
+plx4720_mapk = ic50_2_pathway[,c(6,111)]
+plx4720_mapk = na.omit(plx4720_mapk)
+cor(plx4720_mapk$MAPK,plx4720_mapk$PLX4720..rescreen.)
+#Negative correlation
+```
+
+```{r PDX predictions}
+props_PDX_vald = read.table("props_pdx_vald_all.txt")
+
+props_PDX_vald$Epithelial_All = props_PDX_vald$Epithelial_Basal+ props_PDX_vald$Epithelial_Control + props_PDX_vald$Epithelial_Her2 + props_PDX_vald$Epithelial_Luminal + props_PDX_vald$Epithelial_Other
+props_PDX_vald = props_PDX_vald[props_PDX_vald$Epithelial_All > 0.7,]
+
+#Remove samples with less than 0.1 of Basal + Her2 + Luminal 
+props_PDX_vald$Colsum = props_PDX_vald$Epithelial_Her2 + props_PDX_vald$Epithelial_Basal + props_PDX_vald$Epithelial_Luminal
+
+props_PDX_vald_out = props_PDX_vald[props_PDX_vald$Colsum < 0.1,]
+#High is Epithelial control and Epithelial Other - May be why we had more trouble deconvoluting  this cohort 
+
+#22/30
+
+props_PDX_vald = props_PDX_vald[props_PDX_vald$Colsum > 0.1,]
+
+#Read in the GSE142767 response 
+GSE142767 = read.table("GSE142767_PDX_response.txt")
+GSE142767_carbo= GSE142767[,"Cisplatin_RECIST",drop = FALSE]
+GSE142767_doc = GSE142767[,"Pacitaxel_RECIST",drop = FALSE]
+remove(GSE142767)
+
+responsive = c("PR","CR")
+resistant = c("SD","PD")
+
+GSE142767_carbo$Cisplatin_RECIST = as.character(GSE142767_carbo$Cisplatin_RECIST)
+GSE142767_carbo$Cisplatin_RECIST_crpr[GSE142767_carbo$Cisplatin_RECIST %in% responsive] <-0
+GSE142767_carbo$Cisplatin_RECIST_crpr[GSE142767_carbo$Cisplatin_RECIST %in% resistant] <-1
+GSE142767_carbo$Cisplatin_RECIST_crpr = as.integer(GSE142767_carbo$Cisplatin_RECIST_crpr)
+GSE142767_carbo$Cisplatin_RECIST_cr[GSE142767_carbo$Cisplatin_RECIST == "CR"] <-0
+GSE142767_carbo$Cisplatin_RECIST_cr[GSE142767_carbo$Cisplatin_RECIST != "CR"] <-1
+GSE142767_carbo$Cisplatin_RECIST_cr = as.integer(GSE142767_carbo$Cisplatin_RECIST_cr)
+
+
+GSE142767_doc$Pacitaxel_RECIST = as.character(GSE142767_doc$Pacitaxel_RECIST)
+GSE142767_doc$Pacitaxel_RECIST_crpr[GSE142767_doc$Pacitaxel_RECIST %in% responsive] <-0
+GSE142767_doc$Pacitaxel_RECIST_crpr[GSE142767_doc$Pacitaxel_RECIST %in% resistant] <-1
+GSE142767_doc$Pacitaxel_RECIST_crpr = as.integer(GSE142767_doc$Pacitaxel_RECIST_crpr)
+GSE142767_doc$Pacitaxel_RECIST_cr[GSE142767_doc$Pacitaxel_RECIST == "CR"] <-0
+GSE142767_doc$Pacitaxel_RECIST_cr[GSE142767_doc$Pacitaxel_RECIST != "CR"] <-1
+GSE142767_doc$Pacitaxel_RECIST_cr = as.integer(GSE142767_doc$Pacitaxel_RECIST_cr)
+
+props_sub_carbo_bcm = read.table("props_all_carbo_bcm.txt")
+props_sub_doc20_bcm = read.table("props_all_doc20_bcm.txt")
+props_sub_carbo_bcm = props_sub_carbo_bcm[,c(1,3,5,6,14)]
+colnames(props_sub_carbo_bcm)[5]  = "response"
+rownames(props_sub_carbo_bcm) = props_sub_carbo_bcm$sampleID
+props_sub_carbo_bcm$sampleID = NULL
+
+props_sub_doc20_bcm = props_sub_doc20_bcm[,c(1,3,5,6,14)]
+colnames(props_sub_doc20_bcm)[5] = "response"
+rownames(props_sub_doc20_bcm) = props_sub_doc20_bcm$sampleID
+props_sub_doc20_bcm$sampleID = NULL
+
+props_pdx = props_sub_doc20_bcm[,1:3]
+props_pdx$class = colnames(props_pdx)[apply(props_pdx,1,which.max)]
+
+
+
+glm_model_carbo_all = glm(response ~ ., data = props_sub_carbo_bcm,maxit = 500)
+glm_model_doc20_all = glm(response ~ ., data = props_sub_doc20_bcm,maxit = 500)
+
+props_sub = props[,c(1,3,5,6)]
+rownames(props_sub) = props_sub$sampleID
+props_sub$sampleID = NULL
+
+predictions_cisplatin_PDX_GSE142767_carbo<- glm_model_carbo_all %>% predict(props_sub, type = "response")
+predictions_cisplatin_PDX_GSE142767_carbo = data.frame(predictions_cisplatin_PDX_GSE142767_carbo)
+predictions_cisplatin_PDX_GSE142767_carbo$PDX = rownames(predictions_cisplatin_PDX_GSE142767_carbo)
+GSE142767_carbo$PDX = rownames(GSE142767_carbo)
+GSE142767_carbo_pred = merge(predictions_cisplatin_PDX_GSE142767_carbo,GSE142767_carbo, by = "PDX")
+
+
+roc_test_quant_CRPR_GSE142767_carbo = roc(GSE142767_carbo_pred$Cisplatin_RECIST_crpr,GSE142767_carbo_pred$predictions_cisplatin_PDX_GSE142767_carbo)
+#0.80
+
+roc_test_quant_CR_GSE142767_carbo = roc(GSE142767_carbo_pred$Cisplatin_RECIST_cr,GSE142767_carbo_pred$predictions_cisplatin_PDX_GSE142767_carbo)
+#0.7321
+
+#Plot
+GSE142767_melt_carbo_cr <- melt_roc(GSE142767_carbo_pred, "Cisplatin_RECIST_cr",c("predictions_cisplatin_PDX_GSE142767_carbo","predictions_cisplatin_PDX_GSE142767_carbo"))
+GSE142767_melt_carbo_cr = GSE142767_melt_carbo_cr[GSE142767_melt_carbo_cr$name == "predictions_cisplatin_PDX_GSE142767_carbo",]
+GSE142767_melt_carbo_cr$name = "Cisplatin Predicition CR "
+
+
+GSE142767_melt_carbo_crpr <- melt_roc(GSE142767_carbo_pred, "Cisplatin_RECIST_crpr",c("predictions_cisplatin_PDX_GSE142767_carbo","predictions_cisplatin_PDX_GSE142767_carbo"))
+GSE142767_melt_carbo_crpr = GSE142767_melt_carbo_crpr[GSE142767_melt_carbo_crpr$name == "predictions_cisplatin_PDX_GSE142767_carbo",]
+GSE142767_melt_carbo_crpr$name = "Cisplatin Predicition CRPR "
+
+fit_carbo = rbind(GSE142767_melt_carbo_crpr,GSE142767_melt_carbo_cr)
+
+
+
+predictions_paclitaxel_PDX_GSE142767_doc20<- glm_model_doc20_all %>% predict(props_sub, type = "response")
+predictions_paclitaxel_PDX_GSE142767_doc20 = data.frame(predictions_paclitaxel_PDX_GSE142767_doc20)
+predictions_paclitaxel_PDX_GSE142767_doc20$PDX = rownames(predictions_paclitaxel_PDX_GSE142767_doc20)
+GSE142767_doc$PDX = rownames(GSE142767_doc)
+GSE142767_doc20_pred = merge(predictions_paclitaxel_PDX_GSE142767_doc20,GSE142767_doc, by = "PDX")
+
+
+
+roc_test_quant_CRPR_GSE142767_doc20 = roc(GSE142767_doc20_pred$Pacitaxel_RECIST_crpr,GSE142767_doc20_pred$predictions_paclitaxel_PDX_GSE142767_doc20)
+#0.67
+
+roc_test_quant_CR_GSE142767_doc20 = roc(GSE142767_doc20_pred$Pacitaxel_RECIST_cr,GSE142767_doc20_pred$predictions_paclitaxel_PDX_GSE142767_doc20)
+#0.58
+
+GSE142767_melt_doc20_cr <- melt_roc(GSE142767_doc20_pred, "Pacitaxel_RECIST_cr",c("predictions_paclitaxel_PDX_GSE142767_doc20","predictions_paclitaxel_PDX_GSE142767_doc20"))
+GSE142767_melt_doc20_cr = GSE142767_melt_doc20_cr[GSE142767_melt_doc20_cr$name == "predictions_paclitaxel_PDX_GSE142767_doc20",]
+GSE142767_melt_doc20_cr$name = "Pacitaxel Predicition CR "
+
+
+GSE142767_melt_doc20_crpr <- melt_roc(GSE142767_doc20_pred, "Pacitaxel_RECIST_crpr",c("predictions_paclitaxel_PDX_GSE142767_doc20","predictions_paclitaxel_PDX_GSE142767_doc20"))
+GSE142767_melt_doc20_crpr = GSE142767_melt_doc20_crpr[GSE142767_melt_doc20_crpr$name == "predictions_paclitaxel_PDX_GSE142767_doc20",]
+GSE142767_melt_doc20_crpr$name = "Pacitaxel Predicition CRPR "
+
+fit_doc20 = rbind(GSE142767_melt_doc20_crpr,GSE142767_melt_doc20_cr)
+
+#Plot ROCs together 
+
+fit_doc20_carbo = rbind(fit_doc20,fit_carbo)
+
+###FIGURE 7####
+ggplot(fit_doc20_carbo, aes(d = D, m = M, color = name)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+###Pathway----
+
+```{r pathway analysis}
+pathway_scores_props = read.table("pathway_scores_props.txt")
+#Normalized epithelial
+pathway_scores_props = pathway_scores_props[,c(1:15,16,22,24)]
+pathway_scores_props$All = pathway_scores_props$Epithelial.Basal + pathway_scores_props$Epithelial.Her2 + pathway_scores_props$Epithelial.Luminal
+
+pathway_scores_props$Epithelial.Basal = pathway_scores_props$Epithelial.Basal/pathway_scores_props$All
+pathway_scores_props$Epithelial.Her2 = pathway_scores_props$Epithelial.Her2/pathway_scores_props$All
+pathway_scores_props$Epithelial.Luminal = pathway_scores_props$Epithelial.Luminal/pathway_scores_props$All
+
+cor(pathway_scores_props$EGFR,pathway_scores_props$Epithelial.Basal)
+cor(pathway_scores_props$Hypoxia,pathway_scores_props$Epithelial.Basal)
+
+cor(pathway_scores_props$MAPK,pathway_scores_props$Epithelial.Basal)
+cor(pathway_scores_props$MAPK,pathway_scores_props$Epithelial.Luminal)
+cor(pathway_scores_props$MAPK,pathway_scores_props$Epithelial.Her2)
+
+
+
+```

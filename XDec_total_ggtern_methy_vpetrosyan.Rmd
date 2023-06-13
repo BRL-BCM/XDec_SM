@@ -1,0 +1,135 @@
+---
+title: "methy_analysis"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(knitr)
+library(limma)
+library(RColorBrewer)
+library(stringr)
+library(data.table)
+
+```
+
+
+```{r  methylation}
+
+TCGA.Metadata = read.table("BRCA_clinicalMatrix_New.txt", header = TRUE, check.names = FALSE, sep = "\t", row.names = NULL)
+
+ann450k = getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ann450k = data.frame(ann450k)
+
+#Methylation props vs bulk? 
+methy = read.table("HumanMethylation450", header = TRUE)
+rownames(methy) = methy$sample
+methy$sample = NULL
+methy = na.omit(methy)
+colnames(methy) = gsub("\\.","-",colnames(methy) )
+
+#Need props 
+tcga_ggtern = read.table("props.txt")
+tcga_ggtern_ep = tcga_ggtern[,c(1,7,9)]
+tcga_ggtern_ep[tcga_ggtern_ep< 0] <-0
+
+tcga_ggtern_ep$Colsum = tcga_ggtern_ep$Epithelial.Basal + tcga_ggtern_ep$Epithelial.Her2 + tcga_ggtern_ep$Epithelial.Luminal
+tcga_ggtern_ep$Epithelial.Her2 = tcga_ggtern_ep$Epithelial.Her2 * (1/tcga_ggtern_ep$Colsum)
+tcga_ggtern_ep$Epithelial.Basal = tcga_ggtern_ep$Epithelial.Basal * (1/tcga_ggtern_ep$Colsum)
+tcga_ggtern_ep$Epithelial.Luminal = tcga_ggtern_ep$Epithelial.Luminal * (1/tcga_ggtern_ep$Colsum)
+tcga_ggtern_ep = na.omit(tcga_ggtern_ep)
+
+
+#Bulk methylation
+
+genes_of_interest = c("GRB7" , "MMP7", "GSTP1")
+
+result <- filter(ann450k, grepl(paste(genes_of_interest, collapse="|"), UCSC_RefGene_Name))
+
+all_matches = ann450k$UCSC_RefGene_Name[grepl(paste(genes_of_interest, collapse = "|"), ann450k$UCSC_RefGene_Name)]
+
+genes_anno = ann450k[ann450k$UCSC_RefGene_Name %in% all_matches,]
+genes_anno = genes_anno[!genes_anno$UCSC_RefGene_Name  == "RASSF10",]
+
+probes_interest = genes_anno$Name
+
+methy_probes_interest = methy[rownames(methy) %in% probes_interest,]
+methy_probes_interest = data.frame(t(methy_probes_interest))
+
+#Make sure that we have the ggten propos for these 
+setdiff(rownames(methy_probes_interest),tcga_ggtern$Sample)
+methy_probes_interest = methy_probes_interest[rownames(methy_probes_interest) %in% rownames(tcga_ggtern_ep),]
+
+
+#Top quantile methylated for each genes 
+
+top_methy_sample_TGCA = list()
+for(i in 1:length(genes_of_interest)){
+  probes = genes_anno[genes_anno$UCSC_RefGene_Name %like% genes_of_interest[[i]], "Name" ]
+  probes_df = methy_probes_interest[,colnames(methy_probes_interest) %in% probes]
+  probes_df$means = rowMeans(probes_df)
+  quantile(probes_df$means)
+  top = as.numeric(quantile(probes_df$means)[4])
+  probes_df = probes_df[probes_df$means >= top,]
+  top_methy_sample = rownames(probes_df)
+  top_methy_sample_TGCA[[genes_of_interest[[i]]]] = top_methy_sample
+}
+
+
+#top25
+top_methy_sample_TGCA_25 = list()
+for(i in 1:length(genes_of_interest)){
+  probes = genes_anno[genes_anno$UCSC_RefGene_Name %like% genes_of_interest[[i]], "Name" ]
+  probes_df = methy_probes_interest[,colnames(methy_probes_interest) %in% probes]
+  probes_df$means = rowMeans(probes_df)
+  probes_df = probes_df[order(-probes_df$means),]
+  probes_df = probes_df[1:25,]
+  top_methy_sample = rownames(probes_df)
+  top_methy_sample_TGCA_25[[genes_of_interest[[i]]]] = top_methy_sample
+}
+```
+
+```{r ggtern}
+
+###FIGURE 6##
+
+plots_ggtern_methy = list()
+for(i in 1:length(top_methy_sample_TGCA_25)){
+  gene = names(top_methy_sample_TGCA_25)[[i]]
+  samples_methylated = top_methy_sample_TGCA_25[[i]]
+  tcga_ggtern_gene =  tcga_ggtern_ep[rownames(tcga_ggtern_ep) %in% samples_methylated,]
+ plots_ggtern_methy[[gene]] = ggtern(tcga_ggtern_gene, aes(x = Epithelial.Luminal,y = Epithelial.Basal, z = Epithelial.Her2))  + geom_point(color="black",size=1)  
+}
+
+for(i in 1:length(plots_ggtern_methy)){
+  pdf(paste(names(plots_ggtern_methy)[i],"point_methy.pdf",sep = "."))
+  plot(plots_ggtern_methy[[i]])
+  dev.off()
+  }
+
+
+tcga_ggtern_ep
+
+table_pathway_mapk = table_pathway[,c(1,7,16:18,20)]
+rownames(table_pathway_mapk) = table_pathway_mapk$name
+table_pathway_mapk$name = NULL
+table_pathway_mapk = table_pathway_mapk[order(-table_pathway_mapk$MAPK),]
+table_pathway_mapk = table_pathway_mapk[1:25,]
+
+pdf("mapk.pdf")
+ggtern(table_pathway_mapk, aes(x = Epithelial.Luminal,y = Epithelial.Basal, z = Epithelial.Her2)) +
+stat_density_tern(geom='polygon',aes(fill=..level..,
+                             alpha = ..level..),n = 50, bins=10,color='grey',bdl = 0,contour = TRUE,base = "identity") + scale_fill_gradient(low = "blue",high = "red") + geom_mask() + geom_point(color="black",size=0.5)  
+dev.off()
+
+
+
+
+tcga_ggtern_all_x = tcga_ggtern_ep[top_methy_sample_TGCA$MMP7,]
+ggtern(tcga_ggtern_all_x, aes(x = Epithelial.Luminal,y = Epithelial.Basal, z = Epithelial.Her2)) +
+stat_density_tern(geom='polygon',aes(fill=..level..,
+                             alpha = ..level..),n = 400, bins=10,color='grey',bdl = 0,contour = TRUE,base = "identity") + scale_fill_gradient(low = "blue",high = "red") + geom_mask() + geom_point(color="black",size=0.5)  

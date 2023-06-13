@@ -1,0 +1,310 @@
+---
+title: "XDec_ggtern"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(plyr)
+library(ggtern)
+library(ggplot2)
+```
+
+```{r TCGA}
+###FIGURE 4###
+###FIGURE 5###
+
+tcga_ggtern = read.table("tcga_ggtern.txt")
+tcga_ggtern = na.omit(tcga_ggtern)
+tcga_ggtern = tcga_ggtern[c(2,5,6,8)] 
+colnames(tcga_ggtern)[4] = "D"
+tcga_ggtern = tcga_ggtern[!tcga_ggtern$D %in% "Control" ,]
+tcga_ggtern = tcga_ggtern[!tcga_ggtern$D %in% "Normal" ,]
+colnames(tcga_ggtern) = gsub("Epithelial.","",colnames(tcga_ggtern))
+
+tcga_ggtern_all = read.table("tcga_ggtern.txt")
+tcga_ggtern_all = na.omit(tcga_ggtern_all)
+tcga_ggtern_all = tcga_ggtern_all[c(2,5,6)] 
+colnames(tcga_ggtern_all) = gsub("Epithelial.","",colnames(tcga_ggtern_all))
+
+
+
+ggtern(tcga_ggtern, aes(x = Luminal,y = Basal, z = Her2, color  = D)) +
+  stat_density_tern(aes(alpha = ..level.., fill = D), 
+                    geom = 'polygon', 
+                    bins = 5,
+                    color = "grey",bdl = 0,base = "identity") + scale_fill_brewer(palette = "Set2")
+
+###FIGURE 4###
+
+ggtern(tcga_ggtern_all, aes(x = Luminal,y = Basal, z = Her2)) +
+stat_density_tern(geom='polygon',aes(fill=..level..,
+                             alpha = ..level..),n = 400, bins=10,color='grey',bdl = 0,contour = TRUE,base = "identity") + scale_fill_gradient(low = "blue",high = "red") + geom_mask() + geom_point(color="black",size=0.5)  
+```
+
+```{r TCGA pathways scores}
+###FIGURE 5 ###
+table_pathway = read.table ("pathway_scores_props.txt")
+table_pathway$class = colnames(table_pathway)[16:18][apply(table_pathway[,c(16:18)],1,which.max)]
+
+
+#Hypoxia
+table_pathway_Hypoxia = table_pathway[,c(1,5,16:18,20)]
+rownames(table_pathway_Hypoxia) = table_pathway_Hypoxia$name
+table_pathway_Hypoxia$name = NULL
+table_pathway_Hypoxia[order(-table_pathway_Hypoxia$Hypoxia),]
+
+#Most activated
+quantile(table_pathway_Hypoxia$Hypoxia)
+table_pathway_Hypoxia = table_pathway_Hypoxia[xf$Hypoxia > quantile(table_pathway_Hypoxia$Hypoxia) ,]
+
+
+ggtern(table_pathway_Hypoxia, aes(x = Epithelial.Luminal,y = Epithelial.Basal, z = Epithelial.Her2)) +
+stat_density_tern(geom='polygon',aes(fill=..level..,
+                             alpha = ..level..),n = 400, bins=10,color='grey',bdl = 0,contour = TRUE,base = "identity") + scale_fill_gradient(low = "blue",high = "red") + geom_mask() + geom_point(color="black",size=0.5)  
+
+
+ table_pathway_Hypoxia= table_pathway_Hypoxia[,c(1,5)]
+ 
+  my_comparisons_1_2 <-  list(c("Epithelial.Basal", "Epithelial.Her2"),c("Epithelial.Basal","Epithelial.Luminal"),c("Epithelial.Her2","Epithelial.Luminal"))
+
+ 
+ pdf("pathway_Hypoxia_score_progeny.pdf")
+ ggplot(table_pathway_Hypoxia, aes(x= class, y= Hypoxia, fill = class)) +  geom_boxplot()  + ggtitle("Hypoxia") + stat_compare_means(comparisons = my_comparisons_1_2,method = "t.test")
+ dev.off()
+ 
+ table_pathway_Hypoxia = table_pathway[,c(1,7,16:18,20)]
+rownames(table_pathway_Hypoxia) = table_pathway_Hypoxia$name
+table_pathway_Hypoxia$name = NULL
+ table_pathway_Hypoxia= table_pathway_Hypoxia[,c(1,5)]
+ 
+  pdf("pathway_Hypoxia_score_progeny.pdf")
+ ggplot(table_pathway_Hypoxia, aes(x= class, y= Hypoxia, fill = class)) +  geom_boxplot()  + ggtitle("Hypoxia") + stat_compare_means(comparisons = my_comparisons_1_2,method = "t.test")
+ dev.off()
+ 
+ pdf("pathway_Hypoxia_score_progeny.pdf")
+ ggplot(table_pathway_Hypoxia, aes(x= class, y= Hypoxia, fill = class)) +  geom_boxplot()  + ggtitle("Hypoxia") + stat_compare_means(comparisons = my_comparisons_1_2,method = "t.test")
+ dev.off()
+ 
+ 
+ 
+table_pathway_Hypoxia = table_pathway[,c(1,5,16:18,20)]
+rownames(table_pathway_Hypoxia) = table_pathway_Hypoxia$name
+table_pathway_Hypoxia$name = NULL
+ table_pathway_Hypoxia= table_pathway_Hypoxia[,c(1,5)]
+ 
+  pdf("pathway_Hypoxia_score_progeny.pdf")
+ ggplot(table_pathway_Hypoxia, aes(x= class, y= Hypoxia, fill = class)) +  geom_boxplot()  + ggtitle("Hypoxia") + stat_compare_means(comparisons = my_comparisons_1_2,method = "t.test")
+ dev.off()
+ 
+ 
+ 
+
+
+
+
+
+```
+
+```{r  PDX}
+### FIGURE 4###
+table_pdx = read.table("pdx_table.txt",header = TRUE)
+table_pdx = table_pdx[,c(3,5,6)]
+colnames(table_pdx) = gsub("Epithelial.","",colnames(table_pdx))
+
+
+pdf("pdx_dist.pdf")
+ggtern(table_pdx, aes(x = Luminal,y = Basal, z = Her2))  + geom_point(color="black",size=1)
+dev.off()
+```
+
+```{r cell lines}
+###FIGURE 5###
+props_cell = read.table("props_cell_lines.txt",header = TRUE)
+props_cell = props_cell[props_cell$Epithelial_All > 0.7,]
+table_cell = props_cell
+table_cell$Colsum = table_cell$Epithelial_Her2 + table_cell$Epithelial_Basal + table_cell$Epithelial_Luminal
+table_cell = table_cell[table_cell$Colsum > 0.1,]
+table_cell$Epithelial_Her2_norm = table_cell$Epithelial_Her2 * (1/table_cell$Colsum )
+table_cell$Epithelial_Basal_norm = table_cell$Epithelial_Basal * (1/table_cell$Colsum )
+table_cell$Epithelial_Luminal_norm = table_cell$Epithelial_Luminal * (1/table_cell$Colsum )
+table_cell = table_cell[,13:15]
+colnames(table_cell) = gsub("_norm","",colnames(table_cell))
+colnames(table_cell) = gsub("Epithelial.","",colnames(table_cell))
+
+
+ggtern(table_cell, aes(x = Luminal,y = Basal, z = Her2)) +
+geom_mask() + geom_point(color="black",size=1) 
+
+pdf("pdx_cell.pdf")
+ggtern(table_cell, aes(x = Luminal,y = Basal, z = Her2)) +
+geom_mask() + geom_point(color="black",size=1) 
+dev.off()
+
+
+```
+
+```{r mutations}
+###FIGURE 6###
+mutations = read.table("BRCA_mc3_gene_level.txt",sep = "\t", header = TRUE, fill = TRUE)
+mutations = na.omit(mutations)
+rownames(mutations) = mutations$sample
+mutations$sample = NULL
+mutations$sum = rowSums(mutations)
+mutations_sums = mutations[,"sum",drop = FALSE]
+mutations_sums_top_10 = mutations_sums[order(-mutations_sums$sum),,drop = FALSE]
+mutations_sums_top_10_muts = rownames(mutations_sums_top_10)[1:10]
+mutations_sums_top_10 = mutations_sums_top_10[1:10,,drop = FALSE]
+
+tcga_ggtern_all = read.table("tcga_ggtern.txt")
+tcga_ggtern_all = na.omit(tcga_ggtern_all)
+tcga_ggtern_all = tcga_ggtern_all[c(1,2,5,6)] 
+colnames(tcga_ggtern_all) = gsub("Epithelial.","",colnames(tcga_ggtern_all))
+rownames(tcga_ggtern_all) = tcga_ggtern_all$Sample
+tcga_ggtern_all$Sample = NULL
+
+proportions = read.table("props.txt")
+proportions = proportions[,c(1,7,9)]
+proportions_ggtern = proportions
+
+
+proportions_ggtern$Colsum = proportions_ggtern$Epithelial.Her2 + proportions_ggtern$Epithelial.Basal + proportions_ggtern$Epithelial.Luminal
+proportions_ggtern$Epithelial.Her2 = proportions_ggtern$Epithelial.Her2 * (1/proportions_ggtern$Colsum)
+proportions_ggtern$Epithelial.Basal = proportions_ggtern$Epithelial.Basal * (1/proportions_ggtern$Colsum)
+proportions_ggtern$Epithelial.Luminal = proportions_ggtern$Epithelial.Luminal * (1/proportions_ggtern$Colsum)
+colnames(proportions_ggtern) = gsub("Epithelial.","",colnames(proportions_ggtern))
+proportions_ggtern$Colsum = NULL
+
+
+#Keep only those with mutation data 
+mutations_all_samples  = colnames(mutations[-792])
+mutations_all_samples = gsub("\\.", "-",mutations_all_samples)
+tcga_ggtern_muts = proportions_ggtern[rownames(proportions_ggtern) %in% mutations_all_samples, ]
+mutations_10_all = mutations[mutations_sums_top_10_muts,]
+mutations_10_all = mutations_10_all[,-792]
+
+proportions$sample = rownames(proportions)
+mutations_10_all = data.frame(t(mutations_10_all))
+mutations_10_all$sample = rownames(mutations_10_all)
+mutations_10_all$sample = gsub("\\.", "-",mutations_10_all$sample)
+mutations_10_all_prop = merge(mutations_10_all,proportions,by = "sample")
+rownames(mutations_10_all_prop) = mutations_10_all_prop$sample
+mutations_10_all_prop$sample = NULL
+tcga_ggtern_muts$sample = rownames(tcga_ggtern_muts)
+mutations_10_all_prop_ggtern = merge(mutations_10_all,tcga_ggtern_muts,by = "sample")
+
+
+
+
+#Top 5 
+#PIK3CA significant linear regression, Basal
+cor(mutations_10_all_prop$PIK3CA,mutations_10_all_prop$Epithelial.Basal)
+#-0.3
+cor(mutations_10_all_prop$PIK3CA,mutations_10_all_prop$Epithelial.Her2)
+cor(mutations_10_all_prop$PIK3CA,mutations_10_all_prop$Epithelial.Luminal)
+#0.21
+
+
+#TP53 significant linear regression, Basal,Her2, Luminal 
+cor(mutations_10_all_prop$TP53,mutations_10_all_prop$Epithelial.Basal)
+#0.522
+cor(mutations_10_all_prop$TP53,mutations_10_all_prop$Epithelial.Her2)
+cor(mutations_10_all_prop$TP53,mutations_10_all_prop$Epithelial.Luminal)
+#0.58
+
+#TTN significant linear regression Her2, Luminal 
+cor(mutations_10_all_prop$TTN,mutations_10_all_prop$Epithelial.Basal)
+cor(mutations_10_all_prop$TTN,mutations_10_all_prop$Epithelial.Her2)
+cor(mutations_10_all_prop$TTN,mutations_10_all_prop$Epithelial.Luminal)
+
+density_list = list()
+for (i in 1:length(mutations_sums_top_10_muts)){
+  name = mutations_sums_top_10_muts[i]
+  df = mutations[name,,drop = FALSE]
+  df$sum = NULL
+  df = data.frame(t(df))
+  df = df[df > 0 ,, drop = FALSE]
+  samples = rownames(df)
+  samples = gsub("\\.", "-",samples)
+  density = proportions_ggtern[rownames(proportions_ggtern) %in% samples,]
+  density_list[[name]]= density
+  
+#pdf(paste(name,"_density_tcga.pdf",sep = ""))  
+
+#x = ggtern(density, aes(x = Luminal,y = Basal, z = Her2)) +
+#stat_density_tern(geom='polygon',aes(fill=..level..,
+                    #         alpha = ..level..),n = 400, #bins=10,color='grey',bdl = 0,contour = TRUE,base = "identity") + scale_fill_gradient(low = "blue",high = "red") + geom_mask() + geom_point(color="black",size=0.5)  
+#print(x)
+
+#dev.off()
+}
+
+```
+
+```{r single cell RNAseq}
+filenames <- list.files("~/Documents/XDec/single_cell_decon", pattern="*.csv", full.names=FALSE)
+file_list = lapply(setNames(filenames, make.names(gsub("_sum.csv", "", filenames))), read.csv, header = TRUE)
+names(file_list) = gsub("props_","",names(file_list))
+
+props_list = list()
+names <- names(file_list)
+for(i in seq_along(file_list)) {
+  n <- names(file_list)[[i]]
+  props =  file_list[[i]]
+  props$Colsum = props$Epithelial_Her2 + props$Epithelial_Basal + props$Epithelial_Luminal
+  table = props
+  table$Epithelial_Her2 = table$Epithelial_Her2 * (1/table$Colsum )
+  table$Epithelial_Basal = table$Epithelial_Basal * (1/table$Colsum )
+  table$Epithelial_Luminal = table$Epithelial_Luminal * (1/table$Colsum )
+  table$number = table$sampleNumber
+  table = table[,c("sampleNumber","sampleID","Epithelial_Her2","Epithelial_Basal","Epithelial_Luminal")]
+  table$Sample = n
+  props_list[[n]] = table}
+
+library(data.table)
+all = rbindlist(props_list)
+all$Num = all$Sample
+all$Num = gsub("BC0","",all$Num)
+all$Num  = as.numeric(all$Num )
+all$Num  = all$Num  + 1
+all$Num[all$Sample == "BC011"] <- 1
+
+
+all = all[order(all$Num),]
+
+
+all$Sample  <- with(all, reorder(Sample, Num))
+
+pdf("single_cell_all.pdf")
+ggtern(data = all, mapping = aes(x = Epithelial_Luminal, y =Epithelial_Basal , z = Epithelial_Her2,color = Sample)) +  theme_nomask() + theme(text = element_text(size=15)) + labs(title = "Epithelial Profiles Matched")+ xlab("Luminal")+  ylab("Basal")+
+  zlab("Her2") + geom_point( ) + theme(plot.title = element_text(hjust = 0.5)) 
+dev.off()
+
+
+props = read.csv("~/Documents/XDec/single_cell_decon/props_BC011_sum.csv",header = TRUE) 
+props$Epithelial_All = props$Epithelial_Basal+ props$Epithelial_Control + props$Epithelial_Her2 + props$Epithelial_Luminal + props$Epithelial_Other
+props$Colsum = props$Epithelial_Her2 + props$Epithelial_Basal + props$Epithelial_Luminal
+
+table = props
+table$Epithelial_Her2 = table$Epithelial_Her2 * (1/table$Colsum )
+table$Epithelial_Basal = table$Epithelial_Basal * (1/table$Colsum )
+table$Epithelial_Luminal = table$Epithelial_Luminal * (1/table$Colsum )
+table$number = table$sampleNumber
+
+
+pdf("BCM_11_props_point.pdf")
+ggtern(data = table, mapping = aes(x = Epithelial_Luminal, y =Epithelial_Basal , z = Epithelial_Her2)) +  theme_nomask() + theme(text = element_text(size=15)) + labs(title = "Epithelial Profiles Matched")+ xlab("Luminal")+  ylab("Basal")+
+  zlab("Her2") + geom_point( size = 3, color = "red") + theme(plot.title = element_text(hjust = 0.5)) 
+dev.off()
+```
+
+
+
+
+
+
+
