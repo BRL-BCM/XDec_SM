@@ -99,13 +99,6 @@ source("~/Documents/XDec/sources/createSimulatedMixtures.R")
 source("~/Documents/XDec/sources/PAM50ExerciseFunctions.R")
 source("~/Documents/XDec/sources/diffExpEDec.R")
 
-#dir.create("SingleCell/Stage_0", showWarnings = TRUE, recursive = FALSE)
-#dir.create("SingleCell/Stage_1", showWarnings = TRUE, recursive = FALSE)
-#dir.create("SingleCell/Stage_2", showWarnings = TRUE, recursive = FALSE)
-#dir.create("TCGA_BRCA/Stage_0", showWarnings = TRUE, recursive = FALSE)
-#dir.create("TCGA_BRCA/Stage_1", showWarnings = TRUE, recursive = FALSE)
-#dir.create("TCGA_BRCA/Stage_2", showWarnings = TRUE, recursive = FALSE)
-
 my_palette_1 = colorRampPalette(c("white", "lightgreen", "darkgreen"))(n = 59)
 col_breaks_1 = c(seq(0.00, 0.33999, length = 20), # white
                  seq(0.34, 0.66999, length = 20), # lightgreen
@@ -268,6 +261,11 @@ heatmap.2(as.matrix(GEO.7.Beta.Trans.chosenProbes),
 ```{r Stage 1 - Cell lines}
 Pam50.Genes = c("UBE2T","BIRC5","NUF2","CDC6","CCNB1","TYMS","MYBL2","CEP55","MELK","NDC80","RRM2","UBE2C","CENPF","PTTG1","EXO1","ANLN","CCNE1","CDC20","MKI67","KIF2C","ACTR3B","MYC","EGFR","KRT5","PHGDH","CDH3","MIA","KRT17","FOXC1","SFRP1","KRT14","ESR1","SLC39A6","BAG1","MAPT","PGR","CXXC5","MLPH","BCL2","MDM2","NAT1","FOXA1","BLVRA","MMP11","GPR160","FGFR4","GRB7","TMEM45B","ERBB2")
 chosenProbes.GEO.7.PAM50 = c(chosenProbes.GEO.7, Pam50.Genes)
+
+set.seed(12345)
+stability.TCGA.SC.Model = estimate_stability(TCGA.Beta.GEO.Refs, chosenProbes.GEO.7.PAM50, k.cells, subset_prop = 0.8, num_subsets = 3, reps_per_subset = 3, max_its = 2000, rss_diff_stop = 1e-10)
+
+sc.num = 9
 
 TCGA.BRCA.k.cell.lines = 6
 XDec.TCGA.cell.lines = run_edec_stage_1(meth_bulk_samples = TCGA.Beta.GEO.Refs, informative_loci = chosenProbes.GEO.7.PAM50, num_cell_types = TCGA.BRCA.k.cell.lines, max_its = 2000, rss_diff_stop = 1e-10)
@@ -621,7 +619,14 @@ heatmap.2(as.matrix(SC.Beta.Trans.chosenProbes),
 ```
 
 ```{r Stage 1 - Single Cell}
+
+k.cells = c(3:12)
+
+set.seed(12345)
+stability.TCGA.SC.Model = estimate_stability(TCGA.Beta.Trans, chosenProbes.SC.PAM50, k.cells, subset_prop = 0.8, num_subsets = 3, reps_per_subset = 3, max_its = 2000, rss_diff_stop = 1e-10)
+
 sc.num = 9
+
 XDec.TCGA.SC.Model = run_edec_stage_1(meth_bulk_samples = TCGA.Beta.Trans, informative_loci = chosenProbes.SC.PAM50, num_cell_types = sc.num, max_its = 2000, rss_diff_stop = 1e-10)
 XDec.TCGA.SC.Model.norm.gene = XDec.TCGA.SC.Model$methylation
 XDec.TCGA.SC.Model.norm.gene.chosenProbes = XDec.TCGA.SC.Model.norm.gene[chosenProbes.SC,]
