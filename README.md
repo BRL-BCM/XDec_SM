@@ -79,9 +79,10 @@ given.
 ### Stage 0 — Probe selection and cell-type number estimation
 
 Selects discriminative genes from the reference dataset using Welch t-tests
-(one-vs-rest and an optional pairwise comparison), appends the PAM50 gene
-panel, then estimates the optimal number of cell types *k* by running stability
-analyses over a range of *k* values.
+(one-vs-rest and an optional pairwise comparison), then estimates the optimal
+number of cell types *k* by running stability analyses over a range of *k*
+values.  Use `--append-pam50` to additionally include the PAM50 gene panel
+(only appropriate for BRCA deconvolutions).
 
 ```bash
 python xdec.py stage0 \
@@ -126,7 +127,7 @@ python xdec.py stage1 \
 ### Stage 2 — Cell-type-specific expression estimation
 
 Given raw bulk counts and the proportion matrix from Stage 1, estimates
-cell-type-specific expression means and standard errors per gene via NNLS.
+cell-type-specific expression means and standard errors per gene via NNLS and outputs non-normalized counts.
 Can be stratified by sample group (e.g. PAM50 subtype).
 
 ```bash

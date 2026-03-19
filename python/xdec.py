@@ -16,14 +16,14 @@ The tool has three sequential stages.
 
   Stage 0 – Probe/gene selection & cell-type number estimation
       Selects discriminative genes from a reference dataset using Welch
-      t-tests (one-vs-rest and optional pairwise comparisons), appends the
-      PAM50 gene list, then estimates the optimal number of cell types (k)
+      t-tests (one-vs-rest and optional pairwise comparisons), then estimates
+      the optimal number of cell types (k)
       by running stability analyses over a range of k values.
 
   Stage 1 – Deconvolution: proportions + normalised expression profiles
       Solves a constrained Non-negative Matrix Factorisation (NMF) problem:
 
-          B ≈ P × M^T
+          B ~= P × M^T
 
       where B (genes × samples) is the normalised bulk matrix, P (samples × k)
       are the cell-type proportions (row-stochastic, ≥ 0), and M (genes × k)
@@ -58,7 +58,7 @@ INPUT MODES
 
   informative_loci optional:
       If --probes is not provided, use --use-all-genes or run Stage 0 first.
-      The PAM50 gene list is always appended when probes are selected.
+      Use --append-pam50 to add the PAM50 panel (BRCA-specific; off by default).
 
 USAGE
 -----
@@ -109,7 +109,7 @@ DEPENDENCIES
 
 REFERENCES
 ----------
-  EDec: Boeva et al., Bioinformatics 2019.
+  EDec: Onuchic et al. (2016). Epigenomic Deconvolution of Breast Tumors Reveals Metabolic Coupling between Constituent Cell Types
   XDec: Petrosyan et al. (applied to TCGA BRCA; code: XDec_total_code_vpetrosyan.Rmd).
 """
 
@@ -484,7 +484,7 @@ def select_probes(
     pair_class_b: Optional[str] = None,
     pair_p: float = 1e-5,
     pair_n: int   = 75,
-    append_pam50: bool = True,
+    append_pam50: bool = False,
 ) -> list[str]:
     """Select informative genes for deconvolution (Stage 0 probe selection).
 
@@ -501,9 +501,10 @@ def select_probes(
        Take the top-``pair_n`` and bottom-``pair_n`` genes passing
        ``pair_p``.  Union with the one-vs-rest result.
 
-    3. **Append PAM50 genes** (if ``append_pam50`` is True), matching::
-
-           chosenProbes.GEO.7.PAM50 = c(chosenProbes.GEO.7, Pam50.Genes)
+    3. **Optionally append PAM50 genes** (if ``append_pam50`` is True).
+       This was used in the original BRCA study but is off by default as it
+       is BRCA-specific and would distort deconvolutions for other cancer
+       types.
 
     Parameters
     ----------
@@ -524,7 +525,8 @@ def select_probes(
     pair_n : int
         Top/bottom genes for the pairwise test (default 75).
     append_pam50 : bool
-        Append PAM50_GENES to the final list (default True).
+        Append PAM50_GENES to the final list (default False).
+        Enable via ``--append-pam50`` when running BRCA deconvolutions.
 
     Returns
     -------
@@ -588,7 +590,7 @@ def select_probes(
                 seen.add(g)
                 unique.append(g)
 
-    log.info("Total selected probes (with PAM50): %d", len(unique))
+    log.info("Total selected probes: %d", len(unique))
     return unique
 
 
@@ -951,7 +953,7 @@ def run_stage1(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run XDec Stage 1: NMF deconvolution.
 
-    Solves ``B ≈ P × M^T`` by alternating quadratic programming (P) and
+    Solves ``B ~= P × M^T`` by alternating quadratic programming (P) and
     non-negative least squares (M), using only the informative ``probes`` to
     update P.  M is estimated for **all** genes in ``bulk_norm``.
 
@@ -1067,7 +1069,7 @@ def run_stage2(
 
     proportions : pd.DataFrame
         Cell-type proportion matrix from Stage 1 (or a subset), shape
-        (n_samples, k).  Each row should sum to ≈ 1.
+        (n_samples, k).  Each row should sum to ~= 1.
 
         Before calling this function, aggregate sub-types if needed, e.g.::
 
@@ -1202,7 +1204,7 @@ def cmd_stage0(args: argparse.Namespace) -> None:
             pair_class_b  = args.pair_b or None,
             pair_p        = args.p_pair,
             pair_n        = args.n_pair,
-            append_pam50  = not args.no_pam50,
+            append_pam50  = args.append_pam50,
         )
     else:
         log.warning(
@@ -1564,8 +1566,9 @@ def _add_ref_args(p: argparse.ArgumentParser) -> None:
         help="Metadata column for sample IDs.  Default: Sample_ID.",
     )
     p.add_argument(
-        "--no-pam50", action="store_true",
-        help="Do not append PAM50 genes to the selected probe list.",
+        "--append-pam50", action="store_true",
+        help="Append the PAM50 gene panel to the selected probe list.  "
+             "Only appropriate for BRCA deconvolutions.",
     )
 
 
